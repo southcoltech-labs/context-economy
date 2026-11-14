@@ -48,7 +48,7 @@ node scripts/e1a-record.mjs capture --version "$V" --sha "$SHA" --platform macos
 
 - `installed_commit` is not attested by you. The recorder reads it from `~/.claude/plugins/installed_plugins.json` (`gitCommitSha` of each plugin the marketplace lists) and from the Pi package clone's HEAD, and passes it only when every one equals `$SHA`.
 - It writes `docs/release-proof/$V-<platform>.capture.json`, bound to `$V`, `$SHA`, the platform, `$STAGING` and the Claude and Pi host folders it read.
-- Before reading the hosts it removes any earlier run for this platform and any pending capture, so a capture that then fails leaves nothing to finalize or promote. A failed capture is kept as failed; to try again, start over from step 2 and capture again.
+- Before reading the hosts it removes this platform's earlier run file (`$V-<platform>.json`) and any pending capture, so a capture that then fails leaves nothing to finalize or promote. A failed capture is kept as failed; to try again, start over from step 2 and capture again.
 
 ## 5. Uninstall
 
@@ -69,11 +69,21 @@ node scripts/e1a-record.mjs finalize --version "$V" --sha "$SHA" --platform maco
 - Finalize uses the capture's commits and results as they are; it does not read the installed commits again.
 - It refuses a missing capture, one for another version, SHA or platform, and a different `--pi-repo`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` or `HOME` than at capture. Run it in the same shell set-up as step 4.
 - It checks that the installs are gone: a remaining Claude entry or Pi clone records uninstall as failed.
-- It writes this platform's run into `docs/release-proof/$V.json` and deletes the capture, so a capture is used once.
+- It writes this platform's run to its own file, `docs/release-proof/$V-<platform>.json`, and deletes the capture, so a capture is used once. Each machine keeps its own run file; nothing is copied between machines during the runs.
 
-After both platforms: `node scripts/check-release-proof.mjs "$V" "$SHA" tool-gateway --pi tool-gateway` must print "complete pass".
+## 7. Combine (after both platforms)
 
-Commit `docs/release-proof/$V.json` and `$V.md` to `main` in a pull request (docs-only, labeled `no-release`). The promotion workflow reads them from there.
+Copy each machine's `docs/release-proof/$V-<platform>.json` into one staging checkout, then:
+
+```bash
+node scripts/e1a-record.mjs combine --version "$V" --sha "$SHA"
+node scripts/check-release-proof.mjs "$V" "$SHA" tool-gateway --pi tool-gateway
+```
+
+- `combine` writes `docs/release-proof/$V.json` from the run files, one run per platform. It reads no host. It refuses a missing platform, a run file for another version, SHA or platform, and a pending capture. `$V.json` is derived: a new capture, finalize or combine for this version removes the earlier one first, so a refused or aborted step never leaves an earlier pass in place.
+- The checker must print "complete pass".
+
+Commit `docs/release-proof/$V.json` and `$V.md` to `main` in a pull request (docs-only, labeled `no-release`). The promotion workflow reads them from there. The per-platform run files are not committed.
 
 ## E1b (release drill)
 
