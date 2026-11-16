@@ -17,17 +17,22 @@
 // Single-plugin limit: the evidence model is one call per host step, so each host has exactly one
 // behaviour and one uninstall entry across the proof modules; any other count is a stop. A second
 // plugin with its own call needs the design's "one host session per host" worked out first.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { StopError, evidenceFor } from "./e1-run.mjs";
+import { StopError, evidenceFor, readHostVersions } from "./e1-run.mjs";
 import { cleanB, installedCheck, ledgerCheck, ledgerCounts, listNames, overrideCheck, readLedgers, rtkBlock } from "./e1-helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MARKETPLACE = "context-economy";
 const RTK_VERSION = "0.47.0";
+// The Claude Code release the preparation installs when `claude` is missing (owner decision, 2026-11-15). It is
+// at or above the version floor in e1-helpers.mjs (a test holds it there; that the installer has this release is untried);
+// the host-version guard still reads what is really installed.
+export const CLAUDE_PIN = "2.1.310";
+const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 const SHA40 = /^[0-9a-f]{40}$/m;
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const lines = (out) => String(out).split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l !== "");
@@ -402,4 +407,107 @@ export function cycleSteps(vars) {
   ];
 }
 
-export const parts = { e1a: e1aSteps, e1b: { baseline: baselineSteps, undelivered: undeliveredSteps, promoted: promotedSteps, cycle: cycleSteps } };
+// --- prepare (run sheet Part 0 after the account exists) --------------------------------------------
+//
+// Runs in the new account before there is a clone, a plugin or a host. Not in this part: creating the account,
+// signing in to Claude Code and Pi (a pause, below), clean check (a) and Node and git (`scripts/e1-bootstrap.sh`,
+// which needs no Node). UNTRIED on a real account: the installs below have only run against fakes.
+//
+// Install route (owner decision, review 121 T1; the published runs used this):
+//   Claude Code  per-account, the pinned installer, on both platforms.
+//   Pi           Linux: `npm install -g --ignore-scripts` into the account's own npm prefix (nvm, from the bootstrap),
+//                and a stop when the prefix is not under the account's home (a system prefix would need root).
+//                macOS: never installed here. The standard account uses the machine-wide Pi the admin account
+//                installed; when it is missing the part stops and says what the admin must run.
+
+const UNAME = { "macos-arm64": /^Darwin arm64$/m, "linux-x86_64": /^Linux x86_64$/m };
+
+/** `find ~/.claude ~/.pi -maxdepth 3`: names only, never a file's contents (sign-in files are in there), links not followed. */
+export function listHome(home) {
+  const out = [];
+  const walk = (dir, depth) => {
+    out.push(dir.replace(home, "~"));
+    if (depth >= 3) return;
+    let names;
+    try { if (!lstatSync(dir).isDirectory()) return; names = readdirSync(dir).sort(); } catch { return; }
+    for (const n of names) walk(`${dir}/${n}`, depth + 1);
+  };
+  for (const d of [".claude", ".pi"]) {
+    if (existsSync(join(home, d))) walk(join(home, d), 0);
+    else out.push(`~/${d}: No such file or directory`);
+  }
+  return { code: 0, out: `${out.join("\n")}\n` };
+}
+
+const execIn = (ctx, cmd) => ctx.deps.exec("bash", ["-c", cmd], { cwd: ctx.cwd, env: ctx.env });
+const text = (r) => (r.out ?? r.stdout ?? "").trim();
+
+/** Install a CLI with `install` only when `bin` is not on PATH (a second run of the part changes nothing). */
+const installIfMissing = (label, bin, install) => ({ label, fn: async (ctx) => {
+  const have = await execIn(ctx, `command -v ${bin}`);
+  if (have.code === 0) return { code: 0, out: `${bin} already installed: ${text(have)}\n` };
+  return execIn(ctx, install);
+} });
+
+/** Pi, by platform (see the install route above). */
+function piStep(platform) {
+  const install = `npm install -g --ignore-scripts ${PI_PACKAGE}`;
+  if (platform === "macos-arm64") {
+    return { label: "pi: present, installed machine-wide by the admin account", fn: async (ctx) => {
+      const have = await execIn(ctx, "command -v pi");
+      if (have.code === 0) return { code: 0, out: `pi already installed: ${text(have)}\n` };
+      return { code: 1, out: `pi is not installed. A standard account cannot install it: ask the admin account to run \`${install}\`, then run this part again.\n` };
+    } };
+  }
+  return { label: `pi: ${install}, if missing (into the account's own npm prefix)`, fn: async (ctx) => {
+    const have = await execIn(ctx, "command -v pi");
+    if (have.code === 0) return { code: 0, out: `pi already installed: ${text(have)}\n` };
+    const prefix = text(await execIn(ctx, "npm config get prefix"));
+    if (!prefix.startsWith(`${ctx.env.HOME}/`)) return { code: 1, out: `npm's global prefix is ${prefix || "(unknown)"}, not under ${ctx.env.HOME}: installing Pi there needs root. Use nvm (scripts/e1-bootstrap.sh sets it up) or set a per-account prefix, then run this part again.\n` };
+    return execIn(ctx, install);
+  } };
+}
+
+/** The clone's `origin` must be the staging repository (an existing folder is reused only when it is). */
+const sameRepo = (url, staging) => new RegExp(`(?:^|[/:@])github\\.com[/:]${esc(staging)}(?:\\.git)?/?$`, "i").test(url.trim());
+
+export function prepareSteps(vars) {
+  const { platform, clone, staging } = vars;
+  if (!UNAME[platform]) throw new Error(`prepare needs --platform ${Object.keys(UNAME).join("|")}`);
+  const nodeAtLeast24 = { describe: "Node 24 or later", match: (out) => (Number(/^v(\d+)\./m.exec(out)?.[1]) >= 24 ? { ok: true } : { ok: false, got: out.trim() || "(no output)" }) };
+  return [
+    { id: "P.1", title: "Platform, Node and git (run sheet 0.1, 0.2)", ...seq([
+      { argv: ["uname", "-sm"], expects: [{ describe: `${platform}'s \`uname -sm\``, match: (out) => (UNAME[platform].test(out) ? { ok: true } : { ok: false, got: out.trim() }) }] },
+      { argv: ["node", "--version"], expects: [nodeAtLeast24] },
+      { argv: ["git", "--version"], expects: [{ match: /^git version /m }] },
+    ]) },
+    { id: "P.2", title: "Install Claude Code (pinned) and Pi when missing (run sheet 0.2)", ...seq([
+      installIfMissing(`claude: curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_PIN}, if missing`, "claude", `curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_PIN}`),
+      // Not Pi's install.sh: it runs Pi on its own bundled Node 22 (run sheet 0.2).
+      piStep(platform),
+    ]) },
+    { id: "P.3", title: "Sign in to Claude Code and Pi (operator)",
+      // Whether the sign-ins worked is the operator's to say, not the driver's to check (it never opens credential files).
+      pause: { say: ["Open a new terminal tab if `claude` or `pi` is not found yet (the installers add to PATH).", "Sign in to Claude Code: run `claude`, sign in, then /exit.", "Sign in to Pi: run `pi`, sign in, then quit.", "Press Enter below only when both are signed in."] } },
+    { id: "P.4", title: "Clone staging (run sheet 0.2)", ...seq([
+      { label: `git clone https://github.com/${staging}.git ${clone}, if not cloned`, fn: async (ctx) => {
+        if (!existsSync(join(clone, ".git"))) return ctx.deps.exec("git", ["clone", `https://github.com/${staging}.git`, clone], { cwd: ctx.cwd, env: ctx.env });
+        const origin = await ctx.deps.exec("git", ["-C", clone, "remote", "get-url", "origin"], { cwd: ctx.cwd, env: ctx.env });
+        if (origin.code !== 0 || !sameRepo(text(origin), staging)) return { code: 1, out: `${clone} exists but its origin is ${text(origin) || "(none)"}, not ${staging}: move it away or pass --clone\n` };
+        return { code: 0, out: `${clone} is already a clone of ${staging}\n` };
+      } },
+      { label: "the clone holds .claude-plugin/marketplace.json", fn: () => (existsSync(join(clone, ".claude-plugin", "marketplace.json")) ? { code: 0, out: "marketplace.json present\n" } : { code: 1, out: "marketplace.json missing\n" }) },
+    ]) },
+    { id: "P.5", title: "Clean check (b) and versions (run sheet 0.4)", ...seq([
+      { label: "find ~/.claude ~/.pi -maxdepth 3 (names only)", fn: (ctx) => listHome(ctx.env.HOME) },
+      { label: "node ~/clean-b.mjs", fn: (ctx) => cleanB({ home: ctx.env.HOME }), expects: [{ match: /clean check \(b\): OK/ }] },
+      { argv: ["claude", "--version"] }, { argv: ["pi", "--version"] },
+      { argv: ["node", "--version"], expects: [nodeAtLeast24] }, { argv: ["git", "--version"] },
+      { argv: ["bash", "-c", 'ls -l "$(command -v pi)"'], expects: [{ describe: "pi linked into npm's global node_modules", match: /node_modules/ }] },
+      // The first recording of both host versions (and the floor), in the drill folder the later parts read.
+      { label: "record the host versions", fn: async (ctx) => { await readHostVersions(ctx, "prepare"); return { code: 0, out: "recorded in the transcript\n" }; } },
+    ]) },
+  ];
+}
+
+export const parts = { prepare: prepareSteps, e1a: e1aSteps, e1b: { baseline: baselineSteps, undelivered: undeliveredSteps, promoted: promotedSteps, cycle: cycleSteps } };

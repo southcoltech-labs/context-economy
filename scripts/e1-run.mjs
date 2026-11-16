@@ -244,7 +244,7 @@ export function defaultDeps(env = process.env) {
 
 // --- step data validation (E1, E2) -----------------------------------------------------------------
 
-const STEP_KEYS = ["id", "title", "run", "cwd", "expect", "human", "after", "set"];
+const STEP_KEYS = ["id", "title", "run", "cwd", "expect", "human", "pause", "after", "set"];
 const EXPECT_KEYS = ["cmd", "code", "match", "notMatch", "describe"];
 const dataStop = (where, got) => new StopError({ step: `step data ${where}`, expected: "valid step data (an assertion that cannot run would pass silently)", got });
 
@@ -276,6 +276,12 @@ function validateHuman(h, where) {
   if (bad) throw dataStop(where, `human.evidence: ${bad}`);
 }
 
+/** A pause waits for the operator to do something the driver cannot (create an account, sign in); it judges nothing. */
+function validatePause(p, where) {
+  if (!p || typeof p !== "object") throw dataStop(where, "pause is not an object");
+  if (!Array.isArray(p.say) || !p.say.length || p.say.some((l) => typeof l !== "string")) throw dataStop(where, "pause.say is not a non-empty list of lines");
+}
+
 /** Checks all step data before the first step runs. Throws StopError. */
 export function validateSteps(steps) {
   if (!Array.isArray(steps)) throw dataStop("(all)", "steps is not a list");
@@ -301,12 +307,14 @@ export function validateSteps(steps) {
     } else validateExpect(step, where, 0);
     if (step.after !== undefined && (!Array.isArray(step.after) || step.after.some((f) => typeof f !== "function"))) throw dataStop(where, "after is not a list of functions");
     if (step.set !== undefined && typeof step.set !== "function") throw dataStop(where, "set is not a function");
+    if (step.pause !== undefined && step.human !== undefined) throw dataStop(where, "a step is a pause or a host step, not both");
     if (step.human !== undefined) {
       if (typeof step.human !== "function") validateHuman(step.human, where);
     }
+    if (step.pause !== undefined && typeof step.pause !== "function") validatePause(step.pause, where);
     // R2: a step that checks nothing is the transcription error E1 is about.
     const commands = typeof step.run === "function" || (Array.isArray(step.run) && step.run.length > 0);
-    if (!commands && step.human === undefined && !(Array.isArray(step.after) && step.after.length)) throw dataStop(where, "a step with no command, no human part and no `after` checks nothing");
+    if (!commands && step.human === undefined && step.pause === undefined && !(Array.isArray(step.after) && step.after.length)) throw dataStop(where, "a step with no command, no human part and no `after` checks nothing");
   }
 }
 
@@ -359,6 +367,7 @@ export async function runSteps(ctx, steps) {
         if (!mine.some((a) => a.code !== undefined) && r.code !== 0) fail(`exit code 0 from \`${Array.isArray(cmd) ? cmd.map(quote).join(" ") : cmd.label}\``, `exit code ${r.code}: ${out.trim()}`);
         for (const a of mine) checkExpect(a, results[i], ctx, fail);
       }
+      if (step.pause) await pauseStep(ctx, step, { guard, fail });
       if (step.human) await humanStep(ctx, step, { guard, fail, setRunning: (v) => { hostRunning = v; } });
       for (const a of step.after ?? []) {
         const r = await guard(Promise.resolve(a(ctx, { results })));
@@ -414,6 +423,28 @@ export async function readHostVersions(ctx, where) {
     lines.push(ctx.versions.record(host, reading, where, ctx.deps.now()));
   }
   ctx.transcript.append(`[host versions, ${where}: ${lines.join("; ")}]\n`);
+}
+
+/**
+ * Waits for the operator. The part's clock keeps running (the transcript carries the time before and after),
+ * and nothing is checked: that the operator did what was asked is theirs to say, not the driver's to verify.
+ */
+async function pauseStep(ctx, step, { guard, fail }) {
+  const { deps, transcript } = ctx;
+  const p = typeof step.pause === "function" ? step.pause(ctx) : step.pause;
+  validatePause(p, step.id);
+  const tty = deps.ui.tty();
+  if (!tty.stdin || !tty.stdout) fail("a terminal on stdin and stdout for a pause", `stdin ${tty.stdin ? "is" : "is not"} a TTY, stdout ${tty.stdout ? "is" : "is not"} a TTY`);
+  for (const l of ["", `>>> ${step.id}: do this, then come back:`, ...p.say.map((l) => `    ${l}`), ""]) deps.ui.say(l);
+  transcript.append(`PAUSE (operator):\n${p.say.map((l) => `  ${l}`).join("\n")}\n`);
+  try {
+    await guard(deps.ui.waitEnter("Press Enter when done"));
+  } catch (e) {
+    deps.ui.close();
+    throw e instanceof AbortError ? new AbortError(`aborted at step ${step.id}`) : e;
+  }
+  deps.ui.close();
+  transcript.append(`[operator confirmed at ${deps.now().toISOString().replace(/\.\d+Z$/, "Z")}]\n`);
 }
 
 async function humanStep(ctx, step, { guard, fail, setRunning }) {
@@ -513,7 +544,11 @@ const flag = (argv, name) => {
 };
 
 const USAGE = `usage: e1-run.mjs e1a --version X --platform ${PLATFORMS.join("|")} [--clone DIR] [--staging owner/repo]
-       e1-run.mjs e1b --part <name> [--a X] [--b X] [--drill <folder>] [--clone DIR] [--staging owner/repo]`;
+       e1-run.mjs e1b --part <name> [--a X] [--b X] [--drill <folder>] [--clone DIR] [--staging owner/repo]
+       e1-run.mjs prepare --platform ${PLATFORMS.join("|")} [--drill <folder>] [--clone DIR] [--staging owner/repo]`;
+
+/** The installers put `claude` in ~/.local/bin, which a fresh account's PATH may not have yet. */
+const prepareEnv = (env, home) => ({ ...env, PATH: [`${home}/.local/bin`, env.PATH].filter(Boolean).join(":") });
 
 /**
  * Runs a part and returns the exit code: 0 passed, 1 stopped, 2 refused or bad arguments, 3 the part
@@ -526,7 +561,7 @@ export async function main(argv, deps = defaultDeps()) {
   const [command] = argv;
   if (command === "scrub") return scrubAttempt(argv, deps);
   const home = env.HOME;
-  if (!["e1a", "e1b"].includes(command) || !home) { log.error(USAGE); return 2; }
+  if (!["e1a", "e1b", "prepare"].includes(command) || !home) { log.error(USAGE); return 2; }
 
   const vars = {
     command, staging: flag(argv, "staging") ?? "southcoltech-labs/context-economy-preview",
@@ -535,7 +570,15 @@ export async function main(argv, deps = defaultDeps()) {
   };
   const runsDir = deps.runsDir ?? join(home, "e1-runs");
   let folderName, name, baseline = false;
-  if (command === "e1a") {
+  if (command === "prepare") {
+    // Part 0: runs before there is a clone, a plugin or a host, in the account just created.
+    if (!PLATFORMS.includes(vars.platform)) { log.error(USAGE); return 2; }
+    const date = deps.now().toISOString().slice(0, 10);
+    const drill = flag(argv, "drill");
+    if (drill && !/^[A-Za-z0-9._-]+$/.test(drill)) { log.error("e1-run: --drill is a folder name under the runs folder"); return 2; }
+    folderName = drill ?? `prepare-${date}`;
+    name = `prepare-${date}`;
+  } else if (command === "e1a") {
     if (!vars.V || !PLATFORMS.includes(vars.platform)) { log.error(USAGE); return 2; }
     if (!/^\d+(\.\d+)+$/.test(vars.V)) { log.error("e1-run: --version is a dotted version number such as 0.1.3"); return 2; }
     folderName = `${vars.V}-${vars.platform}`;
@@ -552,7 +595,7 @@ export async function main(argv, deps = defaultDeps()) {
   }
   const parts = deps.parts ?? (await import("./e1-parts.mjs")).parts;
   let steps;
-  try { steps = command === "e1a" ? parts.e1a?.(vars) : parts.e1b?.[vars.part]?.(vars); }
+  try { steps = command === "prepare" ? parts.prepare?.(vars) : command === "e1a" ? parts.e1a?.(vars) : parts.e1b?.[vars.part]?.(vars); }
   catch (e) { log.error(`e1-run: ${e.message}`); return 2; }
   if (!steps) { log.error(`e1-run: no step data for ${command}${vars.part ? ` part ${vars.part}` : ""}`); return 2; }
 
@@ -562,9 +605,9 @@ export async function main(argv, deps = defaultDeps()) {
   const { n, dir: attemptDir } = newAttempt(folder);
   const rawFile = join(attemptDir, `${name}.raw.txt`);
   const transcript = new Transcript(rawFile);
-  const versionFile = command === "e1b" ? join(folder, "host-versions.json") : join(attemptDir, "host-versions.json");
+  const versionFile = command !== "e1a" ? join(folder, "host-versions.json") : join(attemptDir, "host-versions.json");
   const ctx = {
-    deps, vars, cwd: vars.clone, env: allowedEnv(env), transcript, attemptDir, folder, runsDir, steps, proofs: [], step: undefined,
+    deps, vars, cwd: command === "prepare" ? home : vars.clone, env: command === "prepare" ? prepareEnv(allowedEnv(env), home) : allowedEnv(env), transcript, attemptDir, folder, runsDir, steps, proofs: [], step: undefined,
     assertSpans: [], hostRuns: [], hostResults: {}, interrupts: 0, results: {},
   };
   transcript.append(`# e1-run ${command} ${argv.slice(1).join(" ")}\n# attempt ${n}, started ${deps.now().toISOString()}\n`);
@@ -572,11 +615,13 @@ export async function main(argv, deps = defaultDeps()) {
   let code = 0;
   try {
     ctx.versions = new HostVersions({ file: versionFile, requireState: command === "e1b" && !baseline });
-    const marketplace = JSON.parse(readFileSync(join(vars.clone, ".claude-plugin", "marketplace.json"), "utf8"));
-    transcript.append("\n=== P.0 proof modules ===\n");
-    ctx.proofs = await loadProofModules(marketplace, deps.proofDir);
-    transcript.append(`${ctx.proofs.map((m) => m.name).join(", ")}\n`);
-    await readHostVersions(ctx, "part start");
+    if (command !== "prepare") {
+      const marketplace = JSON.parse(readFileSync(join(vars.clone, ".claude-plugin", "marketplace.json"), "utf8"));
+      transcript.append("\n=== P.0 proof modules ===\n");
+      ctx.proofs = await loadProofModules(marketplace, deps.proofDir);
+      transcript.append(`${ctx.proofs.map((m) => m.name).join(", ")}\n`);
+      await readHostVersions(ctx, "part start");
+    } // prepare has no clone, plugin or host yet: its own steps read the host versions once they are installed
     await runSteps(ctx, steps);
     transcript.append("\n=== part finished: every assertion held ===\n");
     log.log(`e1-run: ${command} ${vars.part ?? vars.V} passed${hostCounts(ctx) ? ` (${hostCounts(ctx)})` : ""}. Transcript: ${rawFile}`);
@@ -627,7 +672,9 @@ function scrubAttempt(argv, deps) {
   if (!/^[A-Za-z0-9._-]+$/.test(String(c.name))) { log.error("e1-run: scrub-context.json holds a bad name"); return 2; }
   if (!existsSync(rawFile)) { log.error(`e1-run: ${rawFile} is missing`); return 2; }
   if (existsSync(outFile)) { log.error(`e1-run: ${outFile} already exists; scrub does not overwrite a scrubbed copy`); return 2; }
-  const config = join(c.clone, ".gitleaks.toml");
+  const config = typeof c.config === "string" ? c.config : join(c.clone, ".gitleaks.toml");
+  // The saved path is trusted only when it is one the run itself could have chosen: the clone's config or this driver's own.
+  if (![join(c.clone, ".gitleaks.toml"), join(HERE, "..", ".gitleaks.toml")].some((ok) => samePath(ok, config))) { log.error(`e1-run: scrub-context.json names a gitleaks config that is neither the clone's nor the driver's own: ${config}`); return 2; }
   if (!existsSync(config)) { log.error(`e1-run: ${config} is missing: the scrubber must use the project's gitleaks config`); return 2; }
   const r = scrubToFile(deps, { raw: readFileSync(rawFile, "utf8"), outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt });
   if (!r.ok) { log.error(`e1-run: NO scrubbed copy written: ${r.reason}. The raw transcript stays private in ${attempt}.`); return 3; }
@@ -643,16 +690,26 @@ function hostCounts(ctx) {
   return `${all.length} host step${all.length === 1 ? "" : "s"}, ${all.filter((r) => r.mode === "attested").length} attested`;
 }
 
+/**
+ * The gitleaks config the scrub uses: the clone under test's (E13). Only `prepare` may fall back to this driver's own
+ * checkout, and only when the clone has none (a run that stops before the clone exists still has a transcript to scrub);
+ * nothing of the tested repo has been run by then.
+ */
+function gitleaksConfig(clone, command) {
+  const own = join(clone, ".gitleaks.toml");
+  return existsSync(own) || command !== "prepare" ? own : join(HERE, "..", ".gitleaks.toml");
+}
+
 /** Makes the scrubbed copy from the complete raw file, or says why not. Reports assertions that matched inside a scrubbed span. */
 function scrubFile(ctx, rawFile, outFile) {
-  const config = join(ctx.vars.clone, ".gitleaks.toml");
+  const config = gitleaksConfig(ctx.vars.clone, ctx.vars.command);
   if (!existsSync(config)) return { ok: false, reason: `${config} is missing: the scrubber must use the project's gitleaks config` };
   const raw = readFileSync(rawFile, "utf8");
   const { deps } = ctx;
   const label = ctx.vars.platform?.startsWith("linux") ? "linux" : "mac";
   // E14: what a later `scrub --attempt` needs, saved before the scrub so a failed second pass can be redone.
   const contextFile = join(ctx.attemptDir, "scrub-context.json");
-  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, assertSpans: ctx.assertSpans }, null, 1), { mode: 0o600 });
+  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans }, null, 1), { mode: 0o600 });
   return scrubToFile(ctx.deps, { raw, rawFile, outFile, config, spans: ctx.assertSpans, label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, tmpDir: ctx.attemptDir });
 }
 

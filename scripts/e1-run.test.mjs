@@ -962,7 +962,7 @@ test("E14: the run saves a scrub context; `scrub --attempt` rebuilds a missing c
   const ctxFile = join(dir, "scrub-context.json");
   assert.equal(mode(ctxFile), 0o600);
   const saved = JSON.parse(readFileSync(ctxFile, "utf8"));
-  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "home", "hostname", "label", "name", "realHome"]);
+  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "config", "home", "hostname", "label", "name", "realHome"]);
   assert.equal(saved.assertSpans.length, 1);
   // refuses to overwrite
   assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
