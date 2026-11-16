@@ -313,7 +313,9 @@ function recorded(ctx, key) {
 /** The B commit this part read must equal the one an earlier part recorded for the same B (review 120 S5). */
 const sameRecordedB = (b, index) => (ctx, { results }) => {
   const now = commitLines(results[index].out)[0], state = readState(ctx);
-  return state.b === b && state.shaB !== undefined && state.shaB !== now
+  // One drill folder is one A-to-B drill (review 123 W2): another B than the recorded one is a stop, not a replacement.
+  if (state.b !== undefined && state.b !== b) return { ok: false, expected: `--b ${state.b}, the B this drill folder recorded (one folder is one drill; use a new --drill for ${b})`, got: `--b ${b}` };
+  return state.shaB !== undefined && state.shaB !== now
     ? { ok: false, expected: `v${b}'s commit to equal the ${state.shaB} an earlier part recorded`, got: now }
     : { ok: true };
 };

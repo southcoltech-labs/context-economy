@@ -40,7 +40,7 @@ function world(over = {}) {
   };
   const shaOf = (ref) => (ref === "release" ? w.release : ref === `promoted-v${A}` ? SHA_A : SHA_B);
   const rev = (name) => ({
-    [`promoted-v${A}^{commit}`]: SHA_A, "origin/release": w.release, [`v${B}^{commit}`]: w.tagB ?? SHA_B, "origin/main": w.mainSha ?? SHA_B, [`promoted-v${B}^{commit}`]: w.promotedB,
+    [`promoted-v${A}^{commit}`]: SHA_A, "origin/release": w.release, [`v${B}^{commit}`]: w.tagB ?? SHA_B, "origin/main": w.mainSha ?? SHA_B, ...w.extraRev, [`promoted-v${B}^{commit}`]: w.promotedB,
   })[name];
   w.exec = async (cmd, args, o) => {
     w.execs.push({ cmd, args, cwd: o.cwd });
@@ -80,7 +80,7 @@ function world(over = {}) {
     launchHost: async (host) => {
       w.hosts.push(host);
       if ((w.installedSha || w.rowAlways) && !w.noRow) {
-        const file = join(home, ".claude", "context-economy", host === "claude" ? "gateway-ledger" : "gateway-ledger-pi", `s-${w.hosts.length}-0.jsonl`);
+        const file = join(home, ".claude", "context-economy", w.ledgerSub ?? "", host === "claude" ? "gateway-ledger" : "gateway-ledger-pi", `s-${w.hosts.length}-0.jsonl`);
         mkdirSync(dirname(file), { recursive: true });
         appendFileSync(file, JSON.stringify({ ts: new Date(w.clock + 1000).toISOString(), tool: "Bash", rewrite: "applied", is_error: false }) + "\n");
       }
@@ -471,4 +471,31 @@ test("S7: a ledger folder that is not directly under ~/.claude/context-economy/ 
     assert.throws(() => check(out, { proofs: [proof({ claude: d })], step: { id: "A.4c" }, env: { HOME: "/h" } }), (e) => e instanceof StopError && /directly under ~\/\.claude\/context-economy\//.test(e.message), d);
   }
   assert.doesNotThrow(() => check(out, { proofs: [proof({ claude: ".claude/context-economy/gateway-ledger" })], step: { id: "A.4c" }, env: { HOME: "/h" } }));
+});
+
+test("W2: a different --b in a drill folder that recorded another B is a stop, and the recorded B stays", async () => {
+  const w = world();
+  await baseline(w);
+  assert.equal(await w.part("undelivered", ["--b", B]), 0, dieWith(w));
+  const other = "0.1.4";
+  Object.assign(w, { mainVersion: other, extraRev: { [`v${other}^{commit}`]: SHA_B, [`promoted-v${other}^{commit}`]: SHA_B } });
+  w.err.length = 0;
+  assert.equal(await w.part("undelivered", ["--b", other]), 1);
+  assert.match(dieWith(w), /the B this drill folder recorded/);
+  assert.match(dieWith(w), /use a new --drill for 0\.1\.4/);
+  assert.equal(w.state().b, B);
+  assert.equal(w.state().shaB, SHA_B);
+  w.err.length = 0;
+  w.release = SHA_B;
+  assert.equal(await w.part("promoted", ["--b", other]), 1);
+  assert.match(dieWith(w), /the B this drill folder recorded/);
+});
+
+test("W3: a proof module whose ledger folder is not directly under the data folder ends a part run with STOP and exit 1", async () => {
+  const moved = (t) => t.replaceAll(".claude/context-economy/gateway-ledger", ".claude/context-economy/sub/gateway-ledger");
+  const w = world({ ledgerSub: "sub", deps: { proofDir: proofDirWith({ "tool-gateway": moved }) } });
+  assert.equal(await w.part("baseline"), 1);
+  assert.match(dieWith(w), /STOP at A\.4c/);
+  assert.match(dieWith(w), /directly under ~\/\.claude\/context-economy\//);
+  assert.equal(w.hosts.length, 2, "the host steps ran (their ledger window reads the module's own path); the ledger read is what stops");
 });
