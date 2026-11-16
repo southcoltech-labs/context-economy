@@ -221,6 +221,12 @@ test("T3: an existing folder at the clone path whose origin is another repositor
   mkdirSync(join(ssh.clone, ".git"), { recursive: true }); mkdirSync(join(ssh.clone, ".claude-plugin"));
   writeFileSync(join(ssh.clone, ".claude-plugin", "marketplace.json"), "{}");
   assert.equal(await ssh.run(), 0, why(ssh));
+  const fork = world({ claude: true, pi: true, origin: `https://github.com/${STAGING}-fork.git` });
+  mkdirSync(join(fork.clone, ".git"), { recursive: true });
+  mkdirSync(join(fork.clone, ".claude-plugin")); writeFileSync(join(fork.clone, ".claude-plugin", "marketplace.json"), "{}");
+  // (the clone is otherwise complete, so only the origin check can stop it)
+  assert.equal(await fork.run(), 1, "an origin that only starts with the staging name is another repository");
+  assert.match(why(fork), /STOP at P\.4/);
 });
 
 test("T4: the 0.4 listing goes three levels below the start folder and no deeper", () => {
@@ -245,17 +251,34 @@ test("T7: a clone without marketplace.json stops at P.4; a pi that is not linked
   assert.match(why(b), /STOP at P\.5/);
 });
 
-test("T1: on macOS the bootstrap installs nothing and names what the admin account must install", async () => {
+/** Run e1-bootstrap.sh as the given system: a bin folder with only what the script needs, a fake `uname`, and node/git left out unless asked. */
+async function bootstrap(system, { git = false, args = [] } = {}) {
   const { spawnSync } = await import("node:child_process");
-  if (spawnSync("uname", ["-s"], { encoding: "utf8" }).stdout.trim() !== "Darwin") return;
   const home = mkdtempSync(join(tmpdir(), "e1boot-"));
-  const script = join(dirname(fileURLToPath(import.meta.url)), "e1-bootstrap.sh");
-  // A PATH with no node and no git (the system's own /usr/bin git is a stub, so use a bin folder holding only what the script needs).
   const bin = mkdtempSync(join(tmpdir(), "e1bin-"));
-  for (const c of ["bash", "env", "grep", "sed", "uname", "date", "cat"]) spawnSync("ln", ["-s", spawnSync("which", [c], { encoding: "utf8" }).stdout.trim(), join(bin, c)]);
-  const r = spawnSync("/bin/bash", [script], { env: { PATH: bin, HOME: home }, encoding: "utf8" });
-  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const link = (c) => spawnSync("ln", ["-s", spawnSync("which", [c], { encoding: "utf8" }).stdout.trim(), join(bin, c)]);
+  for (const c of ["bash", "env", "grep", "sed", "date", "cat", ...(git ? ["git"] : [])]) link(c);
+  writeFileSync(join(bin, "uname"), `#!/bin/sh\n[ "$1" = "-s" ] && echo ${system} || echo "${system} ${system === "Darwin" ? "arm64" : "x86_64"}"\n`, { mode: 0o755 });
+  const script = join(dirname(fileURLToPath(import.meta.url)), "e1-bootstrap.sh");
+  const r = spawnSync("/bin/bash", [script, ...args], { env: { PATH: bin, HOME: home }, encoding: "utf8" });
+  return { r, home, out: r.stdout + r.stderr };
+}
+
+test("T1: on macOS the bootstrap installs nothing and names what the admin account must install", async () => {
+  const { r, home, out } = await bootstrap("Darwin");
+  assert.equal(r.status, 1, out);
   assert.match(r.stdout, /Ask the admin account to install, machine-wide/);
   assert.match(r.stdout, /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent/);
   assert.ok(!existsSync(join(home, ".nvm")));
+});
+
+test("U2: on Linux a missing git is an admin task; a missing Node with --check-only exits 1 and installs nothing", async () => {
+  const noGit = await bootstrap("Linux");
+  assert.equal(noGit.r.status, 1, noGit.out);
+  assert.match(noGit.r.stdout, /Ask the admin account to install, machine-wide:\n  git/);
+  const checkOnly = await bootstrap("Linux", { git: true, args: ["--check-only"] });
+  assert.equal(checkOnly.r.status, 1, checkOnly.out);
+  assert.match(checkOnly.r.stdout, /\(--check-only\) would install Node 24 with nvm/);
+  assert.ok(!existsSync(join(checkOnly.home, ".nvm")));
+  assert.doesNotMatch(checkOnly.out, /About to run/, "nothing was offered, let alone run");
 });

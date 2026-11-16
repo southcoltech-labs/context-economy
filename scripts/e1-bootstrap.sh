@@ -82,9 +82,12 @@ if [ "$ASSUME_YES" != 1 ]; then
 fi
 curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh" | bash || exit 1
 export NVM_DIR="$HOME/.nvm"
+# nvm's own scripts read variables they never set, so `set -u` must be off while they run.
+set +u
 # shellcheck disable=SC1091
 . "$NVM_DIR/nvm.sh" || exit 1
 nvm install 24 || exit 1
+set -u
 echo "node: $(node --version)   git: $(git --version)"
 [ "$(node_major)" -ge 24 ] 2>/dev/null || { echo "Node is still below 24 (stop)" >&2; exit 1; }
 echo "bootstrap: OK. In a new terminal (so nvm is loaded): node scripts/e1-run.mjs prepare --platform linux-x86_64 --drill <folder>"
