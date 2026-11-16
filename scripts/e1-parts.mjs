@@ -8,7 +8,9 @@
 // The steps are built before the proof modules are loaded, so a step that depends on them (which
 // plugins, which ledger folders, which behaviour call) is a function of `ctx`, and the `match`
 // functions read `ctx` when they run. Nothing plugin-specific is written here: names, hosts, ledger
-// folders and the behaviour calls come from `scripts/proof/<name>.mjs`.
+// folders and the behaviour calls come from `scripts/proof/<name>.mjs`. One assumption is written here: every
+// ledger folder sits directly under ~/.claude/context-economy/ (the data folder); a module that keeps its
+// ledger anywhere else is a stop, not a ledger read in the wrong place.
 //
 // One departure from the run sheet: it ends E1a with `check-release-proof.mjs`, whose only expected
 // error is the other platform's missing run. With one run file per platform that check has nothing to
@@ -44,8 +46,13 @@ const all = (out, checks) => {
 };
 
 const plugins = (ctx, host) => ctx.proofs.filter((m) => m.hosts.includes(host));
-/** Names of the ledger folders (under ~/.claude/context-economy/) of every proof module. */
-const ledgerFolders = (ctx) => [...new Set(ctx.proofs.flatMap((m) => Object.values(m.ledgerDirs).map((d) => basename(d))))].sort();
+/** Where the ledger folders live, relative to the home. The step data reads them by name under this folder (review 120 S7). */
+const DATA_FOLDER = ".claude/context-economy";
+/** Names of the ledger folders (under ~/.claude/context-economy/) of every proof module; a stop for a ledger kept anywhere else. */
+const ledgerFolders = (ctx) => [...new Set(ctx.proofs.flatMap((m) => Object.values(m.ledgerDirs).map((d) => {
+  if (dirname(d) !== DATA_FOLDER) throw new StopError({ step: ctx.step?.id ?? "ledger folders", expected: `${m.name}'s ledger folder directly under ~/${DATA_FOLDER}/ (the step data reads ledgers there)`, got: d });
+  return basename(d);
+})))].sort();
 const dataLeft = (ctx) => [...new Set(ctx.proofs.flatMap((m) => m.dataLeft))].sort();
 
 /** The one entry for `host` in a proof list (`behaviour` or `uninstall`), as step evidence; a stop for any other count. */
@@ -151,7 +158,7 @@ function installStep(id, title, { ref, sha, removeFirst = false }) {
 
 /** README section 3's update: marketplace update, plugin update, `pi update --extensions`, then the installed check. */
 function updateStep(id, title, { sha, notMention }) {
-  const quiet = notMention ? [{ describe: `no output naming ${notMention}`, match: (out, ctx) => !new RegExp(`\\b${esc(notMention(ctx))}\\b`).test(out) }] : [];
+  const quiet = notMention ? [{ describe: "no output naming the other version", match: (out, ctx) => !new RegExp(`\\b${esc(notMention(ctx))}\\b`).test(out) }] : [];
   return { id, title, ...seq([
     { argv: ["claude", "plugin", "marketplace", "update", MARKETPLACE], expects: quiet },
     { argv: (ctx) => ["claude", "plugin", "update", `${pluginName(ctx)}@${MARKETPLACE}`], expects: quiet },
@@ -303,6 +310,13 @@ function recorded(ctx, key) {
   if (v === undefined) throw new StopError({ step: ctx.step.id, expected: `\`${key}\` recorded by an earlier part in ${stateFile(ctx)}`, got: "(not recorded: run the earlier parts first, with the same --drill)" });
   return v;
 }
+/** The B commit this part read must equal the one an earlier part recorded for the same B (review 120 S5). */
+const sameRecordedB = (b, index) => (ctx, { results }) => {
+  const now = commitLines(results[index].out)[0], state = readState(ctx);
+  return state.b === b && state.shaB !== undefined && state.shaB !== now
+    ? { ok: false, expected: `v${b}'s commit to equal the ${state.shaB} an earlier part recorded`, got: now }
+    : { ok: true };
+};
 const shaA = (ctx) => recorded(ctx, "shaA");
 const shaB = (ctx) => recorded(ctx, "shaB");
 
@@ -342,7 +356,10 @@ export function baselineSteps(vars) {
       fetchTags, { argv: ["git", "checkout", "-q", "main"] }, { argv: ["git", "pull", "-q", "--ff-only"] },
       { argv: ["git", "rev-parse", `promoted-v${a}^{commit}`], expects: [{ match: SHA40 }] },
       { argv: ["git", "rev-parse", "origin/release"], expects: [{ match: SHA40 }] },
-      ...(b === undefined ? [] : [{ argv: ["git", "ls-remote", "--tags", "origin", `refs/tags/v${b}*`], expects: [{ describe: `no tag for ${b} yet (B is not tagged)`, match: (out) => out.trim() === "" }] }]),
+      // Optional (the runbook does not require it); when it is not made, the transcript says so.
+      b === undefined
+        ? { label: "B is not tagged yet", fn: () => ({ code: 0, out: "not checked: no --b given, so B is unknown to this part\n" }) }
+        : { argv: ["git", "ls-remote", "--tags", "origin", `refs/tags/v${b}*`], expects: [{ describe: `no tag for ${b} yet (B is not tagged)`, match: (out) => out.trim() === "" }] },
     ]),
     after: [(ctx, { results }) => {
       const promoted = results[3].out.trim(), release = results[4].out.trim();
@@ -370,7 +387,7 @@ export function undeliveredSteps(vars) {
         expects: [{ describe: `the tag's commit twice (v${b}, origin/main), then A's commit (origin/release)`, match: (out, ctx) => equalLines((c) => { const sha = commitLines(out)[0]; return [sha, sha, shaA(c)]; })(out, ctx) }] },
       versionAt("origin/main", "package.json", b), { argv: (ctx) => ["git", "show", `origin/main:${plugin(ctx)}`], expects: versionAt("", "", b).expects },
       versionAt("origin/release", "package.json", a), { argv: (ctx) => ["git", "show", `origin/release:${plugin(ctx)}`], expects: versionAt("", "", a).expects },
-    ]), set: (ctx, results) => writeState(ctx, { b, shaB: commitLines(results[1].out)[0] }) },
+    ]), after: [sameRecordedB(b, 1)], set: (ctx, results) => writeState(ctx, { b, shaB: commitLines(results[1].out)[0] }) },
     // README section 3's "restart the host" (start and quit without typing) is not a step here: there is no call to give evidence for.
     updateStep("B.2", `Update: ${b} is not delivered`, { sha: shaA, notMention: () => b }),
   ];
@@ -384,7 +401,7 @@ export function promotedSteps(vars) {
       fetchTags,
       { argv: ["git", "rev-parse", `promoted-v${b}^{commit}`, "origin/release", `v${b}^{commit}`],
         expects: [{ describe: `\`promoted-v${b}\`, origin/release and v${b} all the same commit`, match: (out) => { const c = commitLines(out); return c.length === 3 && c.every((x) => x === c[0]) ? { ok: true } : { ok: false, got: c.join(" ") || lines(out).join(" ") || "(no output)" }; } }] },
-    ]), set: (ctx, results) => writeState(ctx, { b, shaB: commitLines(results[1].out)[0] }) },
+    ]), after: [sameRecordedB(b, 1)], set: (ctx, results) => writeState(ctx, { b, shaB: commitLines(results[1].out)[0] }) },
   ];
 }
 

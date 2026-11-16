@@ -241,3 +241,15 @@ test("a proof file for this version already in the clone stops at E1a.1", async 
   assert.equal(await f.run(), 1);
   assert.match(f.err.join("\n"), /STOP at E1a\.1/);
 });
+
+test("S4 E1a.7: a capture file left after finalize stops at E1a.7", async () => {
+  const f = flow();
+  const real = f.exec;
+  f.deps.exec = async (cmd, args, o) => {
+    const r = await real(cmd, args, o);
+    if (cmd === "node" && args[1] === "finalize") writeFileSync(join(f.clone, "docs", "release-proof", `${V}-macos-arm64.capture.json`), "{}");
+    return r;
+  };
+  assert.equal(await f.run(), 1);
+  assert.match(f.err.join("\n"), /STOP at E1a\.7/);
+});

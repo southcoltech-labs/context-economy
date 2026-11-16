@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { main, validateSteps } from "./e1-run.mjs";
-import { parts } from "./e1-parts.mjs";
+import { StopError, main, validateSteps } from "./e1-run.mjs";
+import { baselineSteps, parts } from "./e1-parts.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STAGING = "southcoltech-labs/context-economy-preview";
@@ -40,7 +40,7 @@ function world(over = {}) {
   };
   const shaOf = (ref) => (ref === "release" ? w.release : ref === `promoted-v${A}` ? SHA_A : SHA_B);
   const rev = (name) => ({
-    [`promoted-v${A}^{commit}`]: SHA_A, "origin/release": w.release, [`v${B}^{commit}`]: SHA_B, "origin/main": SHA_B, [`promoted-v${B}^{commit}`]: w.promotedB,
+    [`promoted-v${A}^{commit}`]: SHA_A, "origin/release": w.release, [`v${B}^{commit}`]: w.tagB ?? SHA_B, "origin/main": w.mainSha ?? SHA_B, [`promoted-v${B}^{commit}`]: w.promotedB,
   })[name];
   w.exec = async (cmd, args, o) => {
     w.execs.push({ cmd, args, cwd: o.cwd });
@@ -50,10 +50,11 @@ function world(over = {}) {
     if (cmd === "git" && args[0] === "ls-remote") return ok(w.bTagged ? `${SHA_B}\trefs/tags/v${B}\n` : "");
     if (cmd === "git" && args[0] === "show") {
       const [ref, file] = args[1].split(":");
-      const version = ref === "origin/main" ? w.mainVersion : w.releaseVersion;
+      const version = w.fileVersion?.[args[1]] ?? (ref === "origin/main" ? w.mainVersion : w.releaseVersion);
       return ok(`{\n  "name": "x",\n  "version": "${version}"\n}\n`);
     }
     if (cmd === "git") return ok();
+    if (cmd === "bash") { w.onBash?.(); }
     if (cmd === "bash") return ok(`rtk-aarch64-apple-darwin.tar.gz: OK\nrtk 0.47.0\nrtk.path: ${home}/.local/opt/rtk-0.47.0/rtk\n`);
     if (cmd === "claude" && args[1] === "marketplace" && args[2] === "add") { w.ref = args[3].split("#")[1]; return ok("✔ Successfully added marketplace: context-economy (declared in user settings)\n"); }
     if (cmd === "claude" && args[1] === "marketplace") return ok(args[2] === "remove" ? "✔ Removed\n" : "✔ Updated 1 marketplace\n");
@@ -333,4 +334,141 @@ test("each baseline step title names its run sheet step (S2)", async () => {
   const titles = Object.fromEntries(baselineSteps({ part: "baseline", a: A }).map((s) => [s.id, s.title]));
   assert.match(titles["A.0"], /Part 0\.4/); assert.match(titles["A.1"], /sheet A\.1/); assert.match(titles["A.2"], /sheet A\.2, A\.3/);
   assert.match(titles["A.3"], /sheet A\.4/); assert.match(titles["A.4a"], /sheet A\.5/); assert.match(titles["A.5"], /sheet A\.6/);
+});
+
+// --- review 120 S3 to S7 -------------------------------------------------------------------------------
+
+const SETTINGS_WITH_OVERRIDE = JSON.stringify({ env: { CE_RTK_BIN: "/somewhere/else" } });
+const plantOverride = (w) => { mkdirSync(join(w.home, ".claude"), { recursive: true }); writeFileSync(join(w.home, ".claude", "settings.json"), SETTINGS_WITH_OVERRIDE); };
+
+test("S3: a settings file that sets CE_RTK_BIN stops the baseline at A.2, before any plugin is installed", async () => {
+  const w = world();
+  w.onBash = () => plantOverride(w);
+  assert.equal(await w.part("baseline"), 1);
+  assert.match(dieWith(w), /STOP at A\.2/);
+  assert.match(w.transcript(), /CE_RTK_BIN is set in/);
+  assert.equal(w.hosts.length, 0);
+});
+
+test("S3: a settings file that sets CE_RTK_BIN after the update stops the cycle at its override check (F.2ro), before the host step", async () => {
+  const w = world();
+  await toPromoted(w);
+  const real = w.exec, before = w.hosts.length;
+  w.exec = async (cmd, args, o) => {
+    if (cmd === "claude" && args[1] === "update") plantOverride(w);
+    return real(cmd, args, o);
+  };
+  w.deps.exec = w.exec;
+  assert.equal(await w.part("cycle", ["--b", B]), 1);
+  assert.match(dieWith(w), /STOP at F\.2ro/);
+  assert.equal(w.hosts.length, before);
+});
+
+async function atBaseline(w) { await baseline(w); }
+
+test("S4 B.1: a tag that is not origin/main, a release that is not A, or a wrong version in any of the four files stops at B.1", async () => {
+  const bad = [
+    ["the tag is not origin/main", (w) => { w.mainSha = "c".repeat(40); }],
+    ["origin/release is not A", (w) => { w.release = "c".repeat(40); }],
+    ["main's package.json has another version", (w) => { w.fileVersion = { "origin/main:package.json": "9.9.9" }; }],
+    ["main's plugin.json has another version", (w) => { w.fileVersion = { "origin/main:plugins/tool-gateway/.claude-plugin/plugin.json": "9.9.9" }; }],
+    ["release's package.json has another version", (w) => { w.fileVersion = { "origin/release:package.json": "9.9.9" }; }],
+    ["release's plugin.json has another version", (w) => { w.fileVersion = { "origin/release:plugins/tool-gateway/.claude-plugin/plugin.json": "9.9.9" }; }],
+  ];
+  for (const [what, change] of bad) {
+    const w = world();
+    await atBaseline(w);
+    change(w);
+    w.err.length = 0;
+    assert.equal(await w.part("undelivered", ["--b", B]), 1, what);
+    assert.match(dieWith(w), /STOP at B\.1/, what);
+  }
+});
+
+test("S4 F.4: an update of the pinned tag whose output names B stops at F.4", async () => {
+  const w = world();
+  await toPromoted(w);
+  w.updateOffersB = true;
+  assert.equal(await w.part("cycle", ["--b", B]), 1);
+  assert.match(dieWith(w), /STOP at F\.4/);
+  assert.match(dieWith(w), /no output naming the other version/
+  );
+});
+
+test("S4 F.3, F.5: the rollback and the return each remove the marketplace before adding it again", async () => {
+  const w = world();
+  await toPromoted(w);
+  const from = w.execs.length;
+  assert.equal(await w.part("cycle", ["--b", B]), 0, dieWith(w));
+  const ops = w.execs.slice(from).filter((e) => e.cmd === "claude" && e.args[1] === "marketplace").map((e) => e.args[2]);
+  assert.deepEqual(ops, ["update", "remove", "add", "update", "remove", "add"]);
+});
+
+const proofDirWith = (files) => {
+  const dir = mkdtempSync(join(tmpdir(), "e1b-proof-"));
+  const base = readFileSync(join(ROOT, "scripts", "proof", "tool-gateway.mjs"), "utf8");
+  for (const [name, edit] of Object.entries(files)) writeFileSync(join(dir, `${name}.mjs`), edit(base));
+  return dir;
+};
+const twoPlugins = (w) => writeFileSync(join(w.clone, ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "context-economy", plugins: [{ name: "tool-gateway", source: "./a" }, { name: "second-plugin", source: "./b" }] }));
+
+test("S4: two plugins shipping to Claude Code is a stop, not a guess", async () => {
+  const w = world({ deps: { proofDir: proofDirWith({
+    "tool-gateway": (t) => t,
+    "second-plugin": (t) => t.replace('name: "tool-gateway"', 'name: "second-plugin"').replaceAll("gateway-ledger", "second-ledger").replace(/dataLeft: .*/, 'dataLeft: ["config.json", "second-ledger", "second-ledger-pi"],'),
+  }) } });
+  twoPlugins(w);
+  assert.equal(await w.part("baseline"), 1);
+  assert.match(dieWith(w), /exactly one plugin shipping to Claude Code/);
+  assert.equal(w.hosts.length, 0);
+});
+
+test("S4: two behaviour entries for one host is a stop at the host step", async () => {
+  const w = world({ deps: { proofDir: proofDirWith({
+    "tool-gateway": (t) => t.replace('    { host: "pi", command: "git status", result: 1,', '    { host: "claude", command: "git status", result: 1, ledger: { rows: 1, rewrite: "applied", is_error: false } },\n    { host: "pi", command: "git status", result: 1,'),
+  }) } });
+  assert.equal(await w.part("baseline"), 1);
+  assert.match(dieWith(w), /STOP at A\.4a/);
+  assert.match(dieWith(w), /exactly one behaviour entry for claude/);
+  assert.equal(w.hosts.length, 0);
+});
+
+test("S5: B's commit read by `undelivered` or `promoted` must equal the one an earlier part recorded", async () => {
+  const w = world();
+  await baseline(w);
+  assert.equal(await w.part("undelivered", ["--b", B]), 0, dieWith(w));
+  const other = "c".repeat(40);
+  Object.assign(w, { tagB: other, mainSha: other, promotedB: other, release: other, releaseVersion: B });
+  assert.equal(await w.part("promoted", ["--b", B]), 1);
+  assert.match(dieWith(w), /STOP at E\.6/);
+  assert.match(dieWith(w), /earlier part recorded/);
+  assert.equal(w.state().shaB, SHA_B, "the recorded B commit is not overwritten");
+  const v = world();
+  await baseline(v);
+  assert.equal(await v.part("undelivered", ["--b", B]), 0, dieWith(v));
+  Object.assign(v, { tagB: other, mainSha: other });
+  v.err.length = 0;
+  assert.equal(await v.part("undelivered", ["--b", B]), 1);
+  assert.match(dieWith(v), /STOP at B\.1/);
+});
+
+test("S6: a baseline without --b says in the transcript that B was not checked; with --b it makes the check", async () => {
+  const w = world();
+  await baseline(w);
+  assert.match(w.transcript(), /not checked: no --b given/);
+  const v = world();
+  assert.equal(await v.part("baseline", ["--b", B]), 0, dieWith(v));
+  assert.doesNotMatch(v.transcript(), /not checked: no --b given/);
+  assert.match(v.transcript(), /ls-remote --tags origin 'refs\/tags\/v0\.1\.3\*'/);
+});
+
+test("S7: a ledger folder that is not directly under ~/.claude/context-economy/ is a stop, not a read in the wrong place", () => {
+  const steps = baselineSteps({ part: "baseline", a: A });
+  const check = steps.find((s) => s.id === "A.4c").expect[0].match;
+  const proof = (dirs) => ({ name: "x", hosts: ["claude"], ledgerDirs: dirs, behaviour: [], uninstall: [], dataLeft: [] });
+  const out = "gateway-ledger: 1 rows\nledger check: OK\n";
+  for (const d of [".claude/elsewhere/gateway-ledger", ".claude/context-economy/sub/gateway-ledger", "gateway-ledger"]) {
+    assert.throws(() => check(out, { proofs: [proof({ claude: d })], step: { id: "A.4c" }, env: { HOME: "/h" } }), (e) => e instanceof StopError && /directly under ~\/\.claude\/context-economy\//.test(e.message), d);
+  }
+  assert.doesNotThrow(() => check(out, { proofs: [proof({ claude: ".claude/context-economy/gateway-ledger" })], step: { id: "A.4c" }, env: { HOME: "/h" } }));
 });
