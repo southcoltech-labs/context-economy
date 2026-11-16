@@ -551,7 +551,9 @@ export async function main(argv, deps = defaultDeps()) {
     name = `e1b-${date}`;
   }
   const parts = deps.parts ?? (await import("./e1-parts.mjs")).parts;
-  const steps = command === "e1a" ? parts.e1a?.(vars) : parts.e1b?.[vars.part]?.(vars);
+  let steps;
+  try { steps = command === "e1a" ? parts.e1a?.(vars) : parts.e1b?.[vars.part]?.(vars); }
+  catch (e) { log.error(`e1-run: ${e.message}`); return 2; }
   if (!steps) { log.error(`e1-run: no step data for ${command}${vars.part ? ` part ${vars.part}` : ""}`); return 2; }
 
   privateDir(runsDir);
