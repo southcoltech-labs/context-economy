@@ -29,7 +29,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const MARKETPLACE = "context-economy";
 const RTK_VERSION = "0.47.0";
 // The Claude Code release the preparation installs when `claude` is missing (owner decision, 2026-11-15). It is
-// at or above the version floor in e1-helpers.mjs (a test holds it there; that the installer has this release is untried);
+// at or above the version floor in e1-helpers.mjs (a test holds it there; the owner confirmed that release 2.1.310 exists; that the installer takes it as `bash -s 2.1.310` is untried);
 // the host-version guard still reads what is really installed.
 export const CLAUDE_PIN = "2.1.310";
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
