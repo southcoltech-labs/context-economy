@@ -10,7 +10,7 @@
 // (package.json `pi.extensions`), and every step passed.
 //
 //   node scripts/check-release-proof.mjs <version> <candidate sha> <plugin>... --pi <extension>...
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SHA40 } from "./release-lib.mjs";
@@ -130,4 +130,4 @@ function main([version, sha, ...rest]) {
 
 export { main };
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) process.exitCode = main(process.argv.slice(2));

@@ -14,7 +14,7 @@
 //
 // Data location: $HOME/.claude/context-economy.
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -106,4 +106,4 @@ export function main([command, file], { env = process.env, log = console } = {})
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) process.exitCode = main(process.argv.slice(2));

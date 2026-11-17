@@ -1134,3 +1134,32 @@ test("the driver still starts when a module it loads imports the engine back (no
     rmSync(copy, { recursive: true, force: true });
   }
 });
+
+// Started through a symlinked folder, the entry check used to compare a real path with the path as typed, so
+// main() never ran and the command exited 0 with no output (review 128 A1).
+test("the driver starts through a symlinked scripts folder, as it does by the real path", { skip: SKIP_PLATFORM }, () => {
+  const root = realpathSync(tmp("e1-link-root-"));
+  try {
+    symlinkSync(join(ROOT, "scripts"), join(root, "scripts"));
+    assertStarted(runPrepareCommand(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test("every command-line script of the E1 tooling gives the same output through a symlink as by its real path", () => {
+  const root = realpathSync(tmp("e1-link-all-"));
+  try {
+    symlinkSync(join(ROOT, "scripts"), join(root, "scripts"));
+    const env = { PATH: process.env.PATH, HOME: root };
+    for (const f of ["e1-run.mjs", "e1b-data.mjs", "e1a-record.mjs", "check-release-proof.mjs"]) {
+      const run = (dir) => spawnSync(process.execPath, [join(dir, "scripts", f)], { env, input: "", encoding: "utf8", timeout: 30000 });
+      const real = run(ROOT), linked = run(root);
+      assert.notEqual(real.stderr + real.stdout, "", `${f} prints something when given nothing`);
+      assert.equal(linked.status, real.status, `${f}: exit status through a symlink`);
+      assert.equal(linked.stderr, real.stderr, `${f}: stderr through a symlink`);
+      assert.equal(linked.stdout, real.stdout, `${f}: stdout through a symlink`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
