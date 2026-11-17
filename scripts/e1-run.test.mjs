@@ -4,7 +4,7 @@
 // of each run is the real gitleaks (see e1-scrub.test.mjs).
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1096,22 +1096,41 @@ test("nothing the engine loads imports the engine or the parts (no import circle
   assert.doesNotMatch(readFileSync(join(scripts, "e1-parts.mjs"), "utf8"), /["'][^"'\n]*\be1-run\.mjs["']/, "e1-parts.mjs imports from e1-core.mjs, not e1-run.mjs");
 });
 const REAL_PLATFORM = { "darwin-arm64": "macos-arm64", "linux-x64": "linux-x86_64" }[`${process.platform}-${process.arch}`];
-test("the driver starts as a command and runs a part (it does not exit silently)", { skip: REAL_PLATFORM ? false : "no E1 platform name for this machine" }, () => {
+/** Runs `prepare` as a command from the scripts folder under `root`, in a temp HOME with stub hosts; stdin is not a terminal. */
+function runPrepareCommand(root) {
   const home = tmp("e1-entry-home-"), bin = tmp("e1-entry-bin-");
   for (const [n, v] of [["claude", "2.1.310"], ["pi", "1.0.0"]]) {
     writeFileSync(join(bin, n), `#!/bin/sh\necho ${v}\n`);
     chmodSync(join(bin, n), 0o755);
   }
   try {
-    const r = spawnSync(process.execPath, [join(ROOT, "scripts", "e1-run.mjs"), "prepare", "--platform", REAL_PLATFORM, "--drill", "t"], {
+    return spawnSync(process.execPath, [join(root, "scripts", "e1-run.mjs"), "prepare", "--platform", REAL_PLATFORM, "--drill", "t"], {
       env: { HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin` }, input: "", encoding: "utf8", timeout: 60000,
     });
-    // stdin is not a terminal here, so the part stops at its first pause (P.3): that proves P.1 and P.2 ran.
-    assert.equal(r.status, 1, `exit ${r.status}: ${r.stderr}`);
-    assert.match(r.stderr, /STOP at P\.3/);
-    assert.doesNotMatch(r.stderr, /unsettled top-level await/);
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
+  }
+}
+// stdin is not a terminal here, so the part stops at its first pause (P.3): that proves P.1 and P.2 ran.
+const assertStarted = (r) => {
+  assert.equal(r.status, 1, `exit ${r.status}: ${r.stderr}`);
+  assert.match(r.stderr, /STOP at P\.3/);
+  assert.doesNotMatch(r.stderr, /unsettled top-level await/);
+};
+const SKIP_PLATFORM = REAL_PLATFORM ? false : "no E1 platform name for this machine";
+test("the driver starts as a command and runs a part (it does not exit silently)", { skip: SKIP_PLATFORM }, () => {
+  assertStarted(runPrepareCommand(ROOT));
+});
+test("the driver still starts when a module it loads imports the engine back (no top-level await on the entry line)", { skip: SKIP_PLATFORM }, () => {
+  // A copy of scripts/ (and the gitleaks config the scrub reads) with an import circle added: the entry line must not wait on it.
+  const copy = realpathSync(tmp("e1-circle-copy-")); // the entry check compares real paths; macOS temp folders sit behind a symlink
+  try {
+    cpSync(join(ROOT, "scripts"), join(copy, "scripts"), { recursive: true });
+    copyFileSync(join(ROOT, ".gitleaks.toml"), join(copy, ".gitleaks.toml"));
+    appendFileSync(join(copy, "scripts", "e1-parts.mjs"), `\nimport "./e1-run.mjs";\n`);
+    assertStarted(runPrepareCommand(copy));
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
   }
 });
