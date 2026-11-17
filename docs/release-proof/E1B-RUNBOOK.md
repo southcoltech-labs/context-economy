@@ -1,8 +1,15 @@
 # E1b release drill: runbook
 
-E1b proves the release policy (install and update from `release`, roll back only to `promoted-v<version>`) for tool-gateway. It proves the update and rollback loop on both hosts, in the **staging** repository `southcoltech-labs/context-economy-preview`. It runs once before the public preview, and again whenever the release workflow, the promotion mechanism or a tested host version changes, and before 1.0.
+E1b proves the release policy (install and update from `release`, roll back only to `promoted-v<version>`) for tool-gateway. It proves the update and rollback loop on both hosts, in the **staging** repository `southcoltech-labs/context-economy-preview`. It runs once before the public preview, and again whenever the release workflow or the promotion mechanism changes, and before 1.0.
 
 The record is `docs/release-proof/e1b-<date>.md`: host versions, platform, each command with its output, the installed commits, every override check's output, and the data checks.
+
+**Host versions.** A drill's result is evidence for the host versions it ran on. It is **accepted** for those versions and later ones without a new drill (owner decision, 2026-11-14): users run whatever Claude Code and Pi are current, so the drill does not pin a host. The limit of that decision: each release's E1a runs on current hosts and detects a host-caused break in install, behaviour or uninstall; nothing detects one in update or rollback until the next drill or a user report.
+
+- **Recorded per part.** Each part records `claude --version` and `pi --version`, and the record lists them per part.
+- **Later and earlier.** Each host is compared on its own with its last version recorded in the drill, as dotted numbers compared field by field. Later is recorded and the drill goes on. Earlier, in either host, is a stop. A version string that does not parse is a stop.
+- **A failing step is a stop**, whatever the host version, as every other failure is. It is not retried inside the drill. Whether to check the same step on the earlier host version is decided afterwards by the owner and the engineer; such a check runs in a different account, is recorded separately in the E1b record's notes, and never turns the stopped step into a pass.
+- **Triggers.** A newer host is not, by itself, a reason to run E1b again. A failure that a host change causes is.
 
 ## Before you start
 
