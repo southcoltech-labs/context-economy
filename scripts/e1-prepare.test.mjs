@@ -4,7 +4,7 @@
 // commands in a temp HOME. The shell half (`e1-bootstrap.sh`) is tested at the end of this file, with --check-only.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -252,15 +252,17 @@ test("T7: a clone without marketplace.json stops at P.4; a pi that is not linked
 });
 
 /** Run e1-bootstrap.sh as the given system: a bin folder with only what the script needs, a fake `uname`, and node/git left out unless asked. */
-async function bootstrap(system, { git = false, args = [] } = {}) {
+async function bootstrap(system, { git = false, args = [], gitleaks = "8.30.1", prep, script: scriptOverride, env: extraEnv = {} } = {}) {
   const { spawnSync } = await import("node:child_process");
   const home = mkdtempSync(join(tmpdir(), "e1boot-"));
   const bin = mkdtempSync(join(tmpdir(), "e1bin-"));
   const link = (c) => spawnSync("ln", ["-s", spawnSync("which", [c], { encoding: "utf8" }).stdout.trim(), join(bin, c)]);
-  for (const c of ["bash", "env", "grep", "sed", "date", "cat", ...(git ? ["git"] : [])]) link(c);
+  for (const c of ["bash", "env", "grep", "sed", "date", "cat", "mktemp", "rm", ...(git ? ["git"] : [])]) link(c);
   writeFileSync(join(bin, "uname"), `#!/bin/sh\n[ "$1" = "-s" ] && echo ${system} || echo "${system} ${system === "Darwin" ? "arm64" : "x86_64"}"\n`, { mode: 0o755 });
-  const script = join(dirname(fileURLToPath(import.meta.url)), "e1-bootstrap.sh");
-  const r = spawnSync("/bin/bash", [script, ...args], { env: { PATH: bin, HOME: home }, encoding: "utf8" });
+  if (gitleaks) writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho ${gitleaks}\n`, { mode: 0o755 });
+  if (prep) prep({ home, bin });
+  const script = scriptOverride ?? join(dirname(fileURLToPath(import.meta.url)), "e1-bootstrap.sh");
+  const r = spawnSync("/bin/bash", [script, ...args], { env: { PATH: bin, HOME: home, ...extraEnv }, encoding: "utf8" });
   return { r, home, out: r.stdout + r.stderr };
 }
 
@@ -281,4 +283,186 @@ test("U2: on Linux a missing git is an admin task; a missing Node with --check-o
   assert.match(checkOnly.r.stdout, /\(--check-only\) would install Node 24 with nvm/);
   assert.ok(!existsSync(join(checkOnly.home, ".nvm")));
   assert.doesNotMatch(checkOnly.out, /About to run/, "nothing was offered, let alone run");
+});
+
+test("gitleaks: the bootstrap needs exactly 8.30.1 before any sign-in and installs nothing it cannot verify", async () => {
+  for (const [system, gitleaks] of [["Linux", null], ["Darwin", null], ["Linux", "8.29.0"]]) {
+    const checkOnly = await bootstrap(system, { git: true, gitleaks, args: ["--check-only"] });
+    assert.equal(checkOnly.r.status, 1, checkOnly.out);
+    assert.match(checkOnly.r.stdout, /\(--check-only\) gitleaks 8\.30\.1 is missing/);
+    assert.ok(!existsSync(join(checkOnly.home, ".local", "bin", "gitleaks")));
+  }
+  // With no curl in the bin folder the download fails and nothing is left behind.
+  const noCurl = await bootstrap("Linux", { git: true, gitleaks: null });
+  assert.equal(noCurl.r.status, 1, noCurl.out);
+  assert.match(noCurl.out, /download failed \(stop\)/);
+  assert.ok(!existsSync(join(noCurl.home, ".local", "bin", "gitleaks")));
+  // A matching gitleaks passes the step (the run then goes on to the Node check).
+  const fine = await bootstrap("Linux", { git: true, args: ["--check-only"] });
+  assert.match(fine.r.stdout, /gitleaks: .*gitleaks is 8\.30\.1/);
+});
+
+/**
+ * A fake nvm in the account. `nvm install` puts a Node 24 in front of PATH (with `loaded` it is already there when nvm.sh
+ * is sourced); every call is logged to ~/.nvm/calls. `failInstall` makes `nvm install` fail; `outside` puts a Node 24 that
+ * is not under ~/.nvm in front of PATH instead.
+ */
+function fakeNvm({ home }, { loaded = false, failInstall = false, outside = false } = {}) {
+  const nodeDir = outside ? mkdtempSync(join(tmpdir(), "e1sys-")) : join(home, ".nvm", "versions", "node", "v24.0.0", "bin");
+  mkdirSync(nodeDir, { recursive: true });
+  mkdirSync(join(home, ".nvm"), { recursive: true });
+  writeFileSync(join(nodeDir, "node"), "#!/bin/sh\necho v24.0.0\n", { mode: 0o755 });
+  const put = `PATH="${nodeDir}:$PATH"; export PATH`;
+  writeFileSync(join(home, ".nvm", "nvm.sh"), `nvm() { echo "$*" >> "$NVM_DIR/calls"; case "$1" in install) ${failInstall ? "return 1" : put} ;; esac; }\n${loaded ? put : ""}\n`);
+}
+
+test("Linux Node always comes from nvm: a system Node is not used, nvm is installed when it is missing, and one already there is reused", async () => {
+  const systemNode = (c) => writeFileSync(join(c.bin, "node"), "#!/bin/sh\necho v26.0.0\n", { mode: 0o755 });
+  // A system Node of 24 or later does not count: the plan is still nvm, and check-only installs nothing.
+  const sys = await bootstrap("Linux", { git: true, args: ["--check-only"], prep: systemNode });
+  assert.equal(sys.r.status, 1, sys.out);
+  assert.match(sys.r.stdout, /\(--check-only\) would install Node 24 with nvm .* curl -o- https:\/\/raw\.githubusercontent\.com\/nvm-sh\/nvm\/.*install\.sh \| bash/);
+  assert.ok(!existsSync(join(sys.home, ".nvm")));
+  // nvm present, Node not loaded: nvm install 24 only, no download of the nvm installer.
+  const reuse = await bootstrap("Linux", { git: true, args: ["--yes"], prep: (c) => fakeNvm(c, { loaded: false }) });
+  assert.equal(reuse.r.status, 0, reuse.out);
+  assert.match(reuse.r.stdout, /About to run: nvm install 24 \(nvm is already in /);
+  assert.doesNotMatch(reuse.out, /raw\.githubusercontent\.com/);
+  assert.match(reuse.r.stdout, /bootstrap: OK/);
+  // nvm with Node 24 already loaded: nothing to do.
+  const done = await bootstrap("Linux", { git: true, prep: (c) => fakeNvm(c, { loaded: true }) });
+  assert.equal(done.r.status, 0, done.out);
+  assert.match(done.r.stdout, /Node and git are fine\./);
+  assert.doesNotMatch(done.out, /About to run/);
+});
+
+// --- the gitleaks download, with a fake curl and the real tar and checksum tools ---
+const { createHash } = await import("node:crypto");
+const { spawnSync: spawn2 } = await import("node:child_process");
+const BOOTSTRAP = join(dirname(fileURLToPath(import.meta.url)), "e1-bootstrap.sh");
+const HASHES = { Linux: /551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb/, Darwin: /b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5/ };
+
+/** A gitleaks release archive holding a script that prints `version`; its sha256. */
+function fakeArchive(version) {
+  const d = mkdtempSync(join(tmpdir(), "e1gl-"));
+  writeFileSync(join(d, "gitleaks"), `#!/bin/sh\necho ${version}\n`, { mode: 0o755 });
+  writeFileSync(join(d, "extra"), "not wanted\n");
+  const tgz = join(d, "gl.tgz");
+  spawn2("tar", ["-czf", tgz, "-C", d, "gitleaks", "extra"]);
+  return { tgz, sha: createHash("sha256").update(readFileSync(tgz)).digest("hex") };
+}
+
+/** Run the bootstrap with a fake curl that "downloads" the archive. `patchSha` puts the archive's hash into a scratch copy of the script. */
+async function bootstrapDownload(system, { version = "8.30.1", patchSha = true, ...rest } = {}) {
+  const a = fakeArchive(version);
+  let script = readFileSync(BOOTSTRAP, "utf8");
+  if (patchSha) { assert.match(script, HASHES[system]); script = script.replace(HASHES[system], a.sha); }
+  const dir = mkdtempSync(join(tmpdir(), "e1scr-")); const scratch = join(dir, "e1-bootstrap.sh"); writeFileSync(scratch, script);
+  const tmp = mkdtempSync(join(tmpdir(), "e1tmp-"));
+  const prep = (c) => {
+    for (const t of ["tar", "cut", "mkdir", "cp"]) spawn2("ln", ["-s", spawn2("which", [t], { encoding: "utf8" }).stdout.trim(), join(c.bin, t)]);
+    const sum = spawn2("which", ["sha256sum"], { encoding: "utf8" }).stdout.trim() || spawn2("which", ["shasum"], { encoding: "utf8" }).stdout.trim();
+    spawn2("ln", ["-s", sum, join(c.bin, sum.endsWith("shasum") ? "shasum" : "sha256sum")]);
+    writeFileSync(join(c.bin, "curl"), `#!/bin/sh\n# curl -fsSL -o FILE URL\ncp "${a.tgz}" "$3"\n`, { mode: 0o755 });
+    rest.prep?.(c);
+  };
+  const x = await bootstrap(system, { git: true, gitleaks: null, ...rest, script: scratch, env: { TMPDIR: tmp }, prep });
+  return { ...x, tmp, installed: join(x.home, ".local", "bin", "gitleaks") };
+}
+
+test("C1: the gitleaks download is checked against its sha256, unpacked into ~/.local/bin, and checked for 8.30.1", async () => {
+  for (const system of ["Linux", "Darwin"]) {
+    const good = await bootstrapDownload(system, { prep: (c) => fakeNvm(c, { loaded: true }), args: ["--yes"] });
+    assert.ok(existsSync(good.installed), `${system}: ${good.out}`);
+    assert.match(good.r.stdout, /gitleaks: .*\.local\/bin\/gitleaks is 8\.30\.1/);
+    assert.deepEqual(readdirSync(good.tmp), [], `${system}: the temp dir is removed`);
+    assert.deepEqual(readdirSync(join(good.home, ".local", "bin")), ["gitleaks"], `${system}: only the named member is unpacked`);
+    // The archive's own hash is not the pinned one: nothing is unpacked, nothing is left, and the stop says so.
+    const bad = await bootstrapDownload(system, { patchSha: false });
+    assert.equal(bad.r.status, 1, bad.out);
+    assert.match(bad.r.stderr, /sha256 is [0-9a-f]{64}, expected [0-9a-f]{64} \(stop\)/);
+    assert.ok(!existsSync(bad.installed));
+    assert.deepEqual(readdirSync(bad.tmp), []);
+    // A matching archive whose gitleaks reports another version is refused.
+    const wrong = await bootstrapDownload(system, { version: "9.9.9" });
+    assert.equal(wrong.r.status, 1, wrong.out);
+    assert.match(wrong.r.stderr, /does not report 8\.30\.1 \(stop\)/);
+  }
+  // The Linux hash is the one the CI checks.
+  const ci = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(ci, HASHES.Linux);
+});
+
+test("--check-only reports gitleaks and still reports the Node and git state, then exits 1", async () => {
+  const r = await bootstrap("Linux", { git: true, gitleaks: null, args: ["--check-only"], prep: (c) => fakeNvm(c, { loaded: true }) });
+  assert.equal(r.r.status, 1, r.out);
+  assert.match(r.r.stdout, /\(--check-only\) gitleaks 8\.30\.1 is missing/);
+  assert.match(r.r.stdout, /Node and git are fine\./);
+  assert.ok(!existsSync(join(r.home, ".local", "bin", "gitleaks")));
+});
+
+test("Linux nvm steps: install 24 then use 24 run; a failing install, or a Node that is not from nvm, stops", async () => {
+  // A curl that leaves a mark: with nvm already in the account the nvm installer must not be fetched.
+  const ok = await bootstrap("Linux", { git: true, args: ["--yes"], prep: (c) => { fakeNvm(c); writeFileSync(join(c.home, "curl-called"), ""); writeFileSync(join(c.bin, "curl"), `#!/bin/sh\necho called >> "${join(c.home, "curl-called")}"\n`, { mode: 0o755 }); } });
+  assert.equal(ok.r.status, 0, ok.out);
+  assert.equal(readFileSync(join(ok.home, "curl-called"), "utf8"), "", "nvm was present: its installer was not fetched");
+  assert.deepEqual(readFileSync(join(ok.home, ".nvm", "calls"), "utf8").trim().split("\n"), ["install 24", "use 24"]);
+  const failing = await bootstrap("Linux", { git: true, args: ["--yes"], prep: (c) => fakeNvm(c, { failInstall: true }) });
+  assert.equal(failing.r.status, 1, failing.out);
+  assert.match(failing.r.stderr, /nvm could not install Node 24 \(stop\)/);
+  const outside = await bootstrap("Linux", { git: true, args: ["--yes"], prep: (c) => fakeNvm(c, { outside: true }) });
+  assert.equal(outside.r.status, 1, outside.out);
+  assert.match(outside.r.stderr, /node is not the one from nvm \(stop\)/);
+});
+
+// --- e1-test-run.sh, with a fake node standing in for the driver ---
+const THIS = spawn2("uname", ["-sm"], { encoding: "utf8" }).stdout.trim();
+const RUN_LABEL = { "Darwin arm64": "macos", "Linux x86_64": "linux" }[THIS];
+
+function testRun({ prepareRc = 0, baselineRc = 0 } = {}) {
+  const home = mkdtempSync(join(tmpdir(), "e1run-")); const bin = mkdtempSync(join(tmpdir(), "e1runbin-"));
+  const log = join(home, "driver-calls");
+  // The fake node answers --version and plays the driver: it writes a raw and a scrubbed transcript per run.
+  const nodeBody = `#!/bin/sh
+if [ "$1" = "--version" ]; then echo v24.0.0; exit 0; fi
+echo "$2 $3" >> "${log}"
+case "$2" in
+  prepare) n=1; name=prepare-2026-11-17; rc=${prepareRc} ;;
+  e1b) n=2; name=e1b-2026-11-17; rc=${baselineRc} ;;
+esac
+d="$HOME/e1-runs/t1/attempt-$n"; mkdir -p "$d"
+echo secret > "$d/$name.raw.txt"; echo clean > "$d/$name.txt"; echo '{}' > "$d/scrub-context.json"
+exit $rc
+`;
+  writeFileSync(join(bin, "gitleaks"), "#!/bin/sh\necho 8.30.1\n", { mode: 0o755 });
+  if (RUN_LABEL === "linux") { fakeNvm({ home }, { loaded: true }); writeFileSync(join(home, ".nvm", "versions", "node", "v24.0.0", "bin", "node"), nodeBody, { mode: 0o755 }); }
+  else writeFileSync(join(bin, "node"), nodeBody, { mode: 0o755 });
+  const send = join(home, "out");
+  const r = spawn2("/bin/bash", [join(dirname(fileURLToPath(import.meta.url)), "e1-test-run.sh"), RUN_LABEL, "--send", send], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: home }, encoding: "utf8" });
+  return { r, home, send, calls: existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [], files: existsSync(send) ? readdirSync(send).sort() : [] };
+}
+
+test("e1-test-run.sh: bootstrap, prepare, baseline, then only the scrubbed files are collected", { skip: !RUN_LABEL }, () => {
+  const t = testRun();
+  assert.equal(t.r.status, 0, t.r.stdout + t.r.stderr);
+  assert.deepEqual(t.calls, ["prepare --platform", "e1b --part"]);
+  assert.deepEqual(t.files, ["attempt-1-prepare-2026-11-17.txt", "attempt-2-e1b-2026-11-17.txt", "e1-end.txt", "e1-start.txt"]);
+  assert.match(readFileSync(join(t.send, "e1-start.txt"), "utf8"), /^\d{4}-\d\d-\d\dT[\d:]+Z\ndriver commit: /);
+});
+
+test("e1-test-run.sh: a failed prepare stops the chain, still collects, and exits with the driver's status", { skip: !RUN_LABEL }, () => {
+  const t = testRun({ prepareRc: 3 });
+  assert.equal(t.r.status, 3, t.r.stdout + t.r.stderr);
+  assert.deepEqual(t.calls, ["prepare --platform"], "no baseline after a failed prepare");
+  assert.deepEqual(t.files, ["attempt-1-prepare-2026-11-17.txt", "e1-end.txt", "e1-start.txt"]);
+  const base = testRun({ baselineRc: 1 });
+  assert.equal(base.r.status, 1);
+  assert.ok(base.files.includes("attempt-2-e1b-2026-11-17.txt"));
+});
+
+test("e1-test-run.sh: the wrong label is refused before anything runs", () => {
+  const other = RUN_LABEL === "linux" ? "macos" : "linux";
+  const r = spawn2("/bin/bash", [join(dirname(fileURLToPath(import.meta.url)), "e1-test-run.sh"), other], { env: { PATH: process.env.PATH, HOME: mkdtempSync(join(tmpdir(), "e1run-")) }, encoding: "utf8" });
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /use the other label/);
 });
