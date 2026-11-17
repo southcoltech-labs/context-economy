@@ -1,14 +1,14 @@
 # Repository setup for releases
 
-These steps are done twice, in the same way: first on the staging repository `southcoltech-labs/context-economy-preview`, once it is public, then on the public repository at publication. Nothing in the release path works until they are done. The release workflow fails at "client-id must be set" until step 2. A repository set up with the earlier single release App moves to this setup by [step 8](#8-moving-from-one-release-app).
+These steps set up a repository for releases. `southcoltech-labs/context-economy` was set up with them while it was the staging repository `context-economy-preview`, and kept that setup when it was renamed. Nothing in the release path works until they are done. The release workflow fails at "client-id must be set" until step 2. A repository set up with the earlier single release App moves to this setup by [step 8](#8-moving-from-one-release-app).
 
-**Who does what.** Both repositories belong to the GitHub organization `southcoltech-labs`. So:
+**Who does what.** The repository belongs to the GitHub organization `southcoltech-labs`. So:
 - An organization owner does every step that changes settings, and runs the owner checks in step 7.
 - The release engineer, with write access to the repository, runs only the collaborator checks.
 
 Nobody shares a login or credentials.
 
-## 0. Staging is public first
+## 0. The repository is public first
 
 The design gates candidates and promotions on two protected environments, `candidate` and `promote`, that admit only `main` and wait for a maintainer's approval (on `promote`, another maintainer's). On GitHub, those parts are available as follows ([environment availability](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)):
 
@@ -19,9 +19,9 @@ The design gates candidates and promotions on two protected environments, `candi
 | Required reviewers (approval) | yes | no | **no** |
 | Branch protection and rulesets | yes | no | yes |
 
-Staging is public, on GitHub Free: a public repository provides every row, required reviewers included, with no plan change. So:
+The repository is public, on GitHub Free: a public repository provides every row, required reviewers included, with no plan change. So:
 
-- **Nothing below starts until staging is public.** Making it public is a publication. It happens only after a pre-publication review is recorded, and the owner has done a final review and explicitly approved that repository at that SHA. The owner flips the visibility.
+- **Nothing below starts until the repository is public.** Making it public is a publication. It happens only after a pre-publication review is recorded, and the owner has done a final review and explicitly approved that repository at that SHA. The owner flips the visibility.
 - **On a private repository, stop here.** Its rulesets return 403 on Free, and on Pro it still lacks required reviewers. Do not configure a partial gate, and do not drop approval.
 
 ## 1. Plan
@@ -38,7 +38,7 @@ One App makes candidates, the other promotes them, so a key that a single mainta
 | `context-economy-release` | moves `release`, creates `promoted-v<version>` tags, marks the release latest | **Contents** read and write, **Checks** read-only. Nothing else | `promote.yml`, `promote` |
 
 Then, for each App:
-1. Note the **Client ID**. **Install App → Only select repositories →** the staging repository. At publication, also the public one.
+1. Note the **Client ID**. **Install App → Only select repositories →** this repository.
 2. Repository variables, which are not secret:
    - `CANDIDATE_APP_CLIENT_ID` and `PROMOTE_APP_CLIENT_ID` = the Client IDs.
    - `CANDIDATE_BOT_EMAIL` and `PROMOTE_BOT_EMAIL` = `<bot id>+<app slug>[bot]@users.noreply.github.com`, each bot's no-reply address, with the id from `gh api 'users/<app slug>[bot]' --jq .id`. The sign-off gate lets the version PR's commits through only when their author is `CANDIDATE_BOT_EMAIL`; `release.yml` tags as the candidate bot and `promote.yml` as the promote bot. Each workflow fails until its address is set.
@@ -178,7 +178,7 @@ If one of these is refused for push access, the owner runs it instead.
 - push to or create `release`;
 - push to `main` directly.
 
-Each App's refusals (the candidate App writing `release` or creating a `promoted-v*` tag; the promote App creating a `v*` tag; either updating a tag or pushing to `main`) are checked on staging as separately approved exercises. The permitted actions are checked by the first real release (version PR, candidate tag, prerelease) and the first promotion. Any refusal there is a setup error.
+Each App's refusals (the candidate App writing `release` or creating a `promoted-v*` tag; the promote App creating a `v*` tag; either updating a tag or pushing to `main`) were checked as separately approved exercises before this repository was renamed from `context-economy-preview`; a later change to an App or a ruleset checks them again under that change's own acceptance plan. The permitted actions are checked by the first real release (version PR, candidate tag, prerelease) and the first promotion. Any refusal there is a setup error.
 
 ## 8. Moving from one release App
 

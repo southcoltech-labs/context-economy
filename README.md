@@ -1,7 +1,5 @@
 # context-economy
 
-> **Staging repository.** If you are reading this at `southcoltech-labs/context-economy-preview`, this is the staging repository for release drills, not an install source. Its tags are drills. Install from `southcoltech-labs/context-economy`, as below. (This note is removed before `southcoltech-labs/context-economy` is published.)
-
 Plugins for Claude Code and extensions for Pi that cut context cost. The first one is:
 
 | Plugin | What it does | Claude Code | Pi |
@@ -138,6 +136,15 @@ Your data is kept across rollback, update and uninstall: the gateway ledgers and
 - **Uninstall (Pi):** `pi remove git:github.com/southcoltech-labs/context-economy` (with or without the `@…` you installed).
 
 Uninstalling leaves your data in place: in `~/.claude/context-economy/`, the folders `gateway-ledger/` and `gateway-ledger-pi/` and the file `config.json`. To delete it, remove them yourself.
+
+## Releases and tags
+
+- **Install `#release`** (Claude Code) or **`@release`** (Pi). It moves only when a maintainer promotes a version, and a second maintainer approves it.
+- **`promoted-v<version>`** tags are the released versions, kept for rollback. They never move.
+- **`v<version>`** tags are candidates: published as GitHub prereleases before they are promoted, so they can be checked. Don't install them; a candidate that fails its checks is replaced by the next version, never retagged.
+- Before promotion, each candidate is installed, used and uninstalled on macOS arm64 and Linux x86_64. The records are in [`docs/release-proof/`](docs/release-proof/).
+
+**History.** This repository was first the staging repository `context-economy-preview`, where the release process was rehearsed before it was renamed. `v0.1.0` and `v0.1.1` were rehearsal releases with the same plugin code as `v0.1.2`, and the closed `rulecheck` pull requests (#1 to #5) tested the repository's merge rules.
 
 ## Layout
 
