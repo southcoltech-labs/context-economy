@@ -1080,3 +1080,34 @@ test("V8: the final message names the one file to send; a scrub context of `null
 test("W1: waitFor gives up after its deadline instead of polling forever", async () => {
   await assert.rejects(waitFor(() => false, 60), /not met within 60 ms/);
 });
+
+// The unit tests above hand `main` its parts; none of them start the driver as a command. When e1-run.mjs
+// (an entry module with a top-level await) imported e1-parts.mjs, which imported e1-run.mjs back, Node found
+// the circle unsettled and exited with no output. These two tests keep that from coming back.
+test("the engine's shared code does not import the engine or the parts (no import circle)", () => {
+  for (const f of ["e1-core.mjs", "e1-helpers.mjs", "e1-evidence.mjs", "e1-scrub.mjs"]) {
+    const src = readFileSync(join(ROOT, "scripts", f), "utf8");
+    assert.doesNotMatch(src, /from\s+["']\.\/e1-(run|parts)\.mjs["']/, `${f} must not import e1-run.mjs or e1-parts.mjs`);
+  }
+  assert.doesNotMatch(readFileSync(join(ROOT, "scripts", "e1-parts.mjs"), "utf8"), /from\s+["']\.\/e1-run\.mjs["']/, "e1-parts.mjs imports from e1-core.mjs, not e1-run.mjs");
+});
+const REAL_PLATFORM = { "darwin-arm64": "macos-arm64", "linux-x64": "linux-x86_64" }[`${process.platform}-${process.arch}`];
+test("the driver starts as a command and runs a part (it does not exit silently)", { skip: REAL_PLATFORM ? false : "no E1 platform name for this machine" }, () => {
+  const home = tmp("e1-entry-home-"), bin = tmp("e1-entry-bin-");
+  for (const [n, v] of [["claude", "2.1.310"], ["pi", "1.0.0"]]) {
+    writeFileSync(join(bin, n), `#!/bin/sh\necho ${v}\n`);
+    chmodSync(join(bin, n), 0o755);
+  }
+  try {
+    const r = spawnSync(process.execPath, [join(ROOT, "scripts", "e1-run.mjs"), "prepare", "--platform", REAL_PLATFORM, "--drill", "t"], {
+      env: { HOME: home, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin` }, input: "", encoding: "utf8", timeout: 60000,
+    });
+    // stdin is not a terminal here, so the part stops at its first pause (P.3): that proves P.1 and P.2 ran.
+    assert.equal(r.status, 1, `exit ${r.status}: ${r.stderr}`);
+    assert.match(r.stderr, /STOP at P\.3/);
+    assert.doesNotMatch(r.stderr, /unsettled top-level await/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});

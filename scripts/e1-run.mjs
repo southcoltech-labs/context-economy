@@ -39,27 +39,21 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PLATFORMS } from "./check-release-proof.mjs";
-import { MIN_HOST_VERSION, allowedEnv, judgeVersion, meetsFloor, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
+import { allowedEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
 import { QUESTIONS, askQuestions, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
 import { hitsReport, overlaps, scrub } from "./e1-scrub.mjs";
+import { HOSTS, HostVersions, StopError, asText, clip, evidenceFor, parseVersionLine, readHostVersions } from "./e1-core.mjs";
 
-export const HOSTS = ["claude", "pi"];
+// Moved to e1-core.mjs so that e1-parts.mjs need not import this file (an import circle stops the driver); re-exported for existing importers.
+export { HOSTS, HostVersions, StopError, evidenceFor, parseVersionLine, readHostVersions };
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STOP_LINE = "Send the transcript to the engineer.";
 
-/** A failed assertion: the part stops. */
-export class StopError extends Error {
-  constructor({ step, expected, got }) {
-    super(`${step}: expected ${expected}; got ${got}`);
-    this.step = step; this.expected = expected; this.got = got;
-  }
-}
 /** The driver was interrupted outside a host step. */
 export class AbortError extends Error {}
 
-const clip = (s, n = 600) => (String(s).length > n ? `${String(s).slice(0, n)}…` : String(s));
 const quote = (a) => (/^[A-Za-z0-9_@%+=:,./#^{}~-]+$/.test(a) ? a : `'${a.replaceAll("'", `'\\''`)}'`);
-const asText = (r) => r.out ?? [r.stdout, r.stderr].filter(Boolean).join("\n");
 
 // --- output folders ------------------------------------------------------------------------------
 
@@ -95,54 +89,6 @@ class Transcript {
   }
   close() { closeSync(this.fd); }
 }
-
-// --- host versions -------------------------------------------------------------------------------
-
-/**
- * The versions recorded so far, per host, kept in a state file. Rule (owner, 2026-11-14): a later
- * version is recorded and the run goes on; an earlier one, or one that does not parse, is a stop.
- * After the baseline a missing or unreadable state file is a stop, not a first recording.
- */
-export class HostVersions {
-  constructor({ file, requireState }) {
-    this.file = file;
-    this.requireState = requireState;
-    this.state = { claude: undefined, pi: undefined, history: [] };
-    if (existsSync(file)) {
-      try {
-        const s = JSON.parse(readFileSync(file, "utf8"));
-        if (!s || typeof s !== "object" || !Array.isArray(s.history)) throw new Error("not a state object");
-        this.state = s;
-      } catch (e) {
-        throw new StopError({ step: "host versions", expected: `a readable state file ${file}`, got: e.message });
-      }
-    } else if (requireState) {
-      throw new StopError({ step: "host versions", expected: `the drill state file ${file} from the baseline`, got: "missing (a part after the baseline never makes a first recording)" });
-    }
-  }
-  /** Judges one host's reading; records it when first or later. Returns the transcript line. */
-  record(host, reading, where, now) {
-    const recorded = this.state[host]?.version;
-    const { verdict } = judgeVersion(recorded, reading);
-    if (verdict === "unreadable") throw new StopError({ step: `host version (${where})`, expected: `a version number from \`${host} --version\``, got: clip(reading) || "(nothing)" });
-    if (!meetsFloor(host, reading)) throw new StopError({ step: `host version (${where})`, expected: `${host} ${MIN_HOST_VERSION[host] ?? "(no floor is defined for this host)"} or later (the lowest supported version)`, got: `${host} ${reading}` });
-    if (verdict === "earlier") throw new StopError({ step: `host version (${where})`, expected: `${host} ${recorded} or later`, got: `${host} ${reading}` });
-    if (verdict === "first" && this.requireState) throw new StopError({ step: `host version (${where})`, expected: `a ${host} version recorded in the state file by the baseline`, got: "none recorded" });
-    if (verdict !== "same") {
-      this.state[host] = { version: reading, at: now.toISOString() };
-      this.state.history.push({ host, version: reading, where, at: now.toISOString(), verdict });
-      this.save();
-    }
-    return `${host} ${reading}: ${verdict === "first" ? "first recording" : verdict === "later" ? `later than ${recorded}: recorded` : "same as recorded"}`;
-  }
-  save() {
-    writeFileSync(this.file, JSON.stringify(this.state, null, 2) + "\n", { mode: 0o600 });
-    chmodSync(this.file, 0o600);
-  }
-}
-
-/** The step evidence for one `behaviour` or `uninstall` entry of a proof module (E7: the module owns the ledger folder names). */
-export const evidenceFor = (module, entry, kind) => ({ kind, command: entry.command, result: entry.result, ledgerDir: module.ledgerDirs?.[entry.host], ledger: entry.ledger });
 
 // --- proof modules -------------------------------------------------------------------------------
 
@@ -402,28 +348,6 @@ function checkExpect(a, result, ctx, fail) {
   }
 }
 
-// A line that IS a version: an optional name, the number, an optional parenthesis. A notice such as
-// "Update available: 1.5.2 (run pi update)" is not one.
-const VERSION_LINE = /^(?:[A-Za-z][A-Za-z0-9_.-]*\s+)?v?(\d+\.\d+\.\d+)(?:\s+\([^()]*\))?$/;
-
-/** The one version line in a `--version` output (stdout only), or undefined when there is none or several. */
-export function parseVersionLine(stdout) {
-  const found = String(stdout ?? "").split(/\r?\n/).map((l) => VERSION_LINE.exec(l.trim())).filter(Boolean);
-  return found.length === 1 ? found[0][1] : undefined;
-}
-
-/** Reads both host versions; records, or stops. */
-export async function readHostVersions(ctx, where) {
-  const lines = [];
-  for (const host of HOSTS) {
-    const r = await ctx.deps.exec(host, ["--version"], { cwd: ctx.cwd, env: ctx.env });
-    if (r.code !== 0) throw new StopError({ step: `host version (${where})`, expected: `\`${host} --version\` to run`, got: clip(asText(r)) || `exit ${r.code}` });
-    const reading = parseVersionLine(r.stdout ?? r.out);
-    if (reading === undefined) throw new StopError({ step: `host version (${where})`, expected: `exactly one version line from \`${host} --version\` on stdout`, got: clip(asText(r)) || "(nothing)" });
-    lines.push(ctx.versions.record(host, reading, where, ctx.deps.now()));
-  }
-  ctx.transcript.append(`[host versions, ${where}: ${lines.join("; ")}]\n`);
-}
 
 /**
  * Waits for the operator. The part's clock keeps running (the transcript carries the time before and after),

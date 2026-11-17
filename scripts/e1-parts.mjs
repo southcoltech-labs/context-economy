@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { StopError, evidenceFor, readHostVersions } from "./e1-run.mjs";
+import { StopError, evidenceFor, readHostVersions } from "./e1-core.mjs";
 import { cleanB, installedCheck, ledgerCheck, ledgerCounts, listNames, overrideCheck, readLedgers, rtkBlock } from "./e1-helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
