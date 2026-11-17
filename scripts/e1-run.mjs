@@ -657,4 +657,5 @@ function scrubToFile(deps, { raw, outFile, config, spans, label, home, hostname:
   return { ok: true, file: outFile, hits: r.hits.length, notes };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main(process.argv.slice(2));
+// No top-level await: with one, an import of this file from a module that main() loads at run time never settles and the driver exits silently.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
