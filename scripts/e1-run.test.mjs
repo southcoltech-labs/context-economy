@@ -1084,12 +1084,16 @@ test("W1: waitFor gives up after its deadline instead of polling forever", async
 // The unit tests above hand `main` its parts; none of them start the driver as a command. When e1-run.mjs
 // (an entry module with a top-level await) imported e1-parts.mjs, which imported e1-run.mjs back, Node found
 // the circle unsettled and exited with no output. These two tests keep that from coming back.
-test("the engine's shared code does not import the engine or the parts (no import circle)", () => {
-  for (const f of ["e1-core.mjs", "e1-helpers.mjs", "e1-evidence.mjs", "e1-scrub.mjs"]) {
-    const src = readFileSync(join(ROOT, "scripts", f), "utf8");
-    assert.doesNotMatch(src, /from\s+["']\.\/e1-(run|parts)\.mjs["']/, `${f} must not import e1-run.mjs or e1-parts.mjs`);
+test("nothing the engine loads imports the engine or the parts (no import circle)", () => {
+  // Any quoted path that ends in e1-run.mjs or e1-parts.mjs, as a static or dynamic import, or a bare import.
+  const toEngineOrParts = /["'][^"'\n]*\be1-(?:run|parts)\.mjs["']/;
+  const scripts = join(ROOT, "scripts");
+  const proofs = readdirSync(join(scripts, "proof")).filter((f) => f.endsWith(".mjs")).map((f) => join("proof", f));
+  assert.ok(proofs.length > 0, "there is at least one proof module to check");
+  for (const f of ["e1-core.mjs", "e1-helpers.mjs", "e1-evidence.mjs", "e1-scrub.mjs", ...proofs]) {
+    assert.doesNotMatch(readFileSync(join(scripts, f), "utf8"), toEngineOrParts, `${f} must not import e1-run.mjs or e1-parts.mjs`);
   }
-  assert.doesNotMatch(readFileSync(join(ROOT, "scripts", "e1-parts.mjs"), "utf8"), /from\s+["']\.\/e1-run\.mjs["']/, "e1-parts.mjs imports from e1-core.mjs, not e1-run.mjs");
+  assert.doesNotMatch(readFileSync(join(scripts, "e1-parts.mjs"), "utf8"), /["'][^"'\n]*\be1-run\.mjs["']/, "e1-parts.mjs imports from e1-core.mjs, not e1-run.mjs");
 });
 const REAL_PLATFORM = { "darwin-arm64": "macos-arm64", "linux-x64": "linux-x86_64" }[`${process.platform}-${process.arch}`];
 test("the driver starts as a command and runs a part (it does not exit silently)", { skip: REAL_PLATFORM ? false : "no E1 platform name for this machine" }, () => {
