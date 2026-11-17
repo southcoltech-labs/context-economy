@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOSTS, HostVersions, main, newAttempt, loadProofModules, parseVersionLine, realExec, realLaunchHost, realUi } from "./e1-run.mjs";
 import { ALLOWED_VARIABLES, REFUSED_VARIABLES } from "./e1-helpers.mjs";
 import { appendFileSync } from "node:fs";
@@ -1090,7 +1090,7 @@ test("nothing the engine loads imports the engine or the parts (no import circle
   const scripts = join(ROOT, "scripts");
   const proofs = readdirSync(join(scripts, "proof")).filter((f) => f.endsWith(".mjs")).map((f) => join("proof", f));
   assert.ok(proofs.length > 0, "there is at least one proof module to check");
-  for (const f of ["e1-core.mjs", "e1-helpers.mjs", "e1-evidence.mjs", "e1-scrub.mjs", ...proofs]) {
+  for (const f of ["e1-core.mjs", "e1-helpers.mjs", "e1-evidence.mjs", "e1-scrub.mjs", "entry.mjs", ...proofs]) {
     assert.doesNotMatch(readFileSync(join(scripts, f), "utf8"), toEngineOrParts, `${f} must not import e1-run.mjs or e1-parts.mjs`);
   }
   assert.doesNotMatch(readFileSync(join(scripts, "e1-parts.mjs"), "utf8"), /["'][^"'\n]*\be1-run\.mjs["']/, "e1-parts.mjs imports from e1-core.mjs, not e1-run.mjs");
@@ -1161,5 +1161,34 @@ test("every command-line script of the E1 tooling gives the same output through 
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Review 129 B1: a start with no script file (standard input, where argv[1] is "-") must not make an import throw.
+test("importing each entry script from standard input works (isEntry is false when argv[1] is not a file)", () => {
+  for (const f of ["e1-run.mjs", "e1b-data.mjs", "e1a-record.mjs", "check-release-proof.mjs"]) {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-"], {
+      env: { PATH: process.env.PATH, HOME: tmpdir() }, input: `await import(${JSON.stringify(join(ROOT, "scripts", f))}); console.log("imported");`, encoding: "utf8", timeout: 30000,
+    });
+    assert.equal(r.status, 0, `${f}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), "imported", f);
+  }
+});
+test("isEntry: true for the script's own url, false for another file, a missing path or no path", async () => {
+  const { isEntry } = await import("./entry.mjs");
+  const dir = realpathSync(tmp("e1-isentry-"));
+  try {
+    const file = join(dir, "a.mjs");
+    writeFileSync(file, "");
+    symlinkSync(file, join(dir, "link.mjs"));
+    const url = pathToFileURL(file).href;
+    assert.equal(isEntry(url, file), true);
+    assert.equal(isEntry(url, join(dir, "link.mjs")), true, "through a symlink");
+    assert.equal(isEntry(url, join(dir, "other.mjs")), false, "a path that does not exist");
+    assert.equal(isEntry(url, "-"), false, "standard input");
+    assert.equal(isEntry(url, undefined), false);
+    assert.equal(isEntry(pathToFileURL(join(dir, "b.mjs")).href, file), false, "another module");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

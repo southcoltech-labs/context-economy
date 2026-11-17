@@ -41,6 +41,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PLATFORMS } from "./check-release-proof.mjs";
 import { allowedEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
 import { QUESTIONS, askQuestions, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
+import { isEntry } from "./entry.mjs";
 import { hitsReport, overlaps, scrub } from "./e1-scrub.mjs";
 import { HOSTS, HostVersions, StopError, asText, clip, evidenceFor, parseVersionLine, readHostVersions } from "./e1-core.mjs";
 
@@ -658,4 +659,4 @@ function scrubToFile(deps, { raw, outFile, config, spans, label, home, hostname:
 }
 
 // No top-level await: with one, an import of this file from a module that main() loads at run time never settles and the driver exits silently.
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
+if (isEntry(import.meta.url)) main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
