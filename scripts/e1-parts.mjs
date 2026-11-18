@@ -24,7 +24,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { StopError, evidenceFor, readHostVersions } from "./e1-core.mjs";
+import { StopError, asText, evidenceFor, readHostVersions } from "./e1-core.mjs";
+import { GITLEAKS_VERSION } from "./e1-scrub.mjs";
 import { cleanB, installedCheck, ledgerCheck, ledgerCounts, listNames, overrideCheck, readLedgers, rtkBlock } from "./e1-helpers.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -499,6 +500,12 @@ export function prepareSteps(vars) {
       { argv: ["uname", "-sm"], expects: [{ describe: `${platform}'s \`uname -sm\``, match: (out) => (UNAME[platform].test(out) ? { ok: true } : { ok: false, got: out.trim() }) }] },
       { argv: ["node", "--version"], expects: [nodeAtLeast24] },
       { argv: ["git", "--version"], expects: [{ match: /^git version /m }] },
+      // The scrubbed copy needs exactly this gitleaks, and without it a run finds out only at its end, after the sign-ins.
+      { label: `gitleaks ${GITLEAKS_VERSION} (the scrubbed copy needs it)`, fn: async (ctx) => {
+        const r = await ctx.deps.exec("gitleaks", ["version"], { cwd: ctx.cwd, env: ctx.env });
+        const out = asText(r).trim();
+        return { code: 0, out: r.code === 0 && out === GITLEAKS_VERSION ? out : `${out || "gitleaks is not installed"} (exit ${r.code}). Run \`bash scripts/e1-bootstrap.sh\`: it installs gitleaks ${GITLEAKS_VERSION}.` };
+      }, expects: [{ describe: `gitleaks ${GITLEAKS_VERSION}, installed by \`bash scripts/e1-bootstrap.sh\``, match: (out) => (out.trim() === GITLEAKS_VERSION ? { ok: true } : { ok: false, got: out.trim() }) }] },
     ]) },
     { id: "P.2", title: "Install Claude Code (pinned) and Pi when missing (run sheet 0.2)", ...seq([
       installIfMissing(`claude: curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_PIN}, if missing`, "claude", `curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_PIN}`),

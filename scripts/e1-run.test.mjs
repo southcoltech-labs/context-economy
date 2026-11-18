@@ -1099,7 +1099,7 @@ const REAL_PLATFORM = { "darwin-arm64": "macos-arm64", "linux-x64": "linux-x86_6
 /** Runs `prepare` as a command from the scripts folder under `root`, in a temp HOME with stub hosts; stdin is not a terminal. */
 function runPrepareCommand(root) {
   const home = tmp("e1-entry-home-"), bin = tmp("e1-entry-bin-");
-  for (const [n, v] of [["claude", "2.1.310"], ["pi", "1.0.0"]]) {
+  for (const [n, v] of [["claude", "2.1.310"], ["pi", "1.0.0"], ["gitleaks", "8.30.1"]]) {
     writeFileSync(join(bin, n), `#!/bin/sh\necho ${v}\n`);
     chmodSync(join(bin, n), 0o755);
   }

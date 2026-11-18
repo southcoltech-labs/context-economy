@@ -27,6 +27,7 @@ function world(over = {}) {
     if (cmd === "uname") return ok(w.uname);
     if (cmd === "node") return ok(`${w.node}\n`);
     if (cmd === "git" && args[0] === "--version") return ok("git version 2.50.0\n");
+    if (cmd === "gitleaks") return w.gitleaks === null ? { code: 1, out: "" } : ok(`${w.gitleaks ?? "8.30.1"}\n`);
     if (cmd === "git" && args[0] === "clone") { mkdirSync(join(args[2], ".git"), { recursive: true }); mkdirSync(join(args[2], ".claude-plugin")); if (!w.noMarketplace) writeFileSync(join(args[2], ".claude-plugin", "marketplace.json"), "{}"); return ok("Cloning\n"); }
     if (cmd === "git" && args[0] === "-C") return ok(`${w.origin}\n`);
     if (sh === "command -v claude") return w.claude ? ok("/h/.local/bin/claude\n") : { code: 1, out: "" };
@@ -107,6 +108,17 @@ test("Node below 24 stops at P.1; the platform must match uname", async () => {
   const b = world({ uname: "Darwin arm64\n" });
   assert.equal(await b.run(), 1);
   assert.match(why(b), /STOP at P\.1/);
+});
+
+test("P.1 needs gitleaks 8.30.1 and says how to get it, before any install or sign-in", async () => {
+  for (const gitleaks of [null, "8.29.0"]) {
+    const w = world({ gitleaks });
+    assert.equal(await w.run(), 1);
+    assert.match(why(w), /STOP at P\.1/);
+    assert.match(why(w), /bash scripts\/e1-bootstrap\.sh/);
+    assert.ok(!w.curl && !w.claude, "nothing was installed");
+    assert.equal(w.paused, 0, "no sign-in pause was reached");
+  }
 });
 
 test("a pause without a terminal stops instead of waiting", async () => {
