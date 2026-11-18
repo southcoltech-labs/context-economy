@@ -13,11 +13,11 @@ import { main, validateSteps } from "./e1-run.mjs";
 import { MIN_HOST_VERSION, meetsFloor } from "./e1-helpers.mjs";
 import { CLAUDE_PIN, listHome, parts, prepareSteps } from "./e1-parts.mjs";
 
-const STAGING = "southcoltech-labs/context-economy-preview";
+const STAGING = "southcoltech-labs/context-economy";
 
 function world(over = {}) {
   const home = mkdtempSync(join(tmpdir(), "e1prep-home-"));
-  const clone = join(mkdtempSync(join(tmpdir(), "e1prep-parent-")), "context-economy-preview");
+  const clone = join(mkdtempSync(join(tmpdir(), "e1prep-parent-")), "context-economy");
   const w = { home, clone, execs: [], out: [], err: [], says: [], paused: 0, claude: false, pi: false, node: "v24.1.0", platform: "linux-x86_64", prefix: undefined, origin: `https://github.com/${STAGING}.git`, noMarketplace: false, piLink: "lrwxr-xr-x 1 u s 40 Nov 15 09:00 /h/.nvm/bin/pi -> ../lib/node_modules/@earendil-works/pi-coding-agent/bin/pi\n", clock: Date.parse("2026-11-15T09:00:00Z"), tty: true, ...over };
   w.uname = over.uname ?? (over.platform === "macos-arm64" ? "Darwin arm64\n" : "Linux x86_64\n");
   w.exec = async (cmd, args, o) => {
@@ -228,7 +228,7 @@ test("T3: an existing folder at the clone path whose origin is another repositor
   mkdirSync(join(w.clone, ".git"), { recursive: true });
   assert.equal(await w.run(), 1);
   assert.match(why(w), /STOP at P\.4/);
-  assert.match(why(w), /not southcoltech-labs\/context-economy-preview/);
+  assert.match(why(w), /not southcoltech-labs\/context-economy/);
   const ssh = world({ claude: true, pi: true, origin: `git@github.com:${STAGING}.git` });
   mkdirSync(join(ssh.clone, ".git"), { recursive: true }); mkdirSync(join(ssh.clone, ".claude-plugin"));
   writeFileSync(join(ssh.clone, ".claude-plugin", "marketplace.json"), "{}");

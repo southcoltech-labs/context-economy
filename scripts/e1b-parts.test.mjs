@@ -15,7 +15,7 @@ import { StopError, main, validateSteps } from "./e1-run.mjs";
 import { baselineSteps, parts } from "./e1-parts.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const STAGING = "southcoltech-labs/context-economy-preview";
+const STAGING = "southcoltech-labs/context-economy";
 const A = "0.1.2", B = "0.1.3";
 const SHA_A = "a".repeat(40), SHA_B = "b".repeat(40);
 const DRILL = "drill-1";

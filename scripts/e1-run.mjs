@@ -489,8 +489,8 @@ export async function main(argv, deps = defaultDeps()) {
   if (!["e1a", "e1b", "prepare"].includes(command) || !home) { log.error(USAGE); return 2; }
 
   const vars = {
-    command, staging: flag(argv, "staging") ?? "southcoltech-labs/context-economy-preview",
-    clone: resolve(flag(argv, "clone") ?? join(home, "context-economy-preview")),
+    command, staging: flag(argv, "staging") ?? "southcoltech-labs/context-economy",
+    clone: resolve(flag(argv, "clone") ?? join(home, "context-economy")),
     V: flag(argv, "version"), platform: flag(argv, "platform"), part: flag(argv, "part"), a: flag(argv, "a"), b: flag(argv, "b"),
   };
   const runsDir = deps.runsDir ?? join(home, "e1-runs");

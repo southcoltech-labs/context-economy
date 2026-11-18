@@ -12,7 +12,9 @@ import { e1aSteps } from "./e1-parts.mjs";
 import toolGateway from "./proof/tool-gateway.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const STAGING = "southcoltech-labs/context-economy-preview";
+const STAGING = "southcoltech-labs/context-economy";
+// The published 0.1.2 output was recorded under the repository's old name; the replays use it.
+const REPLAY_STAGING = "southcoltech-labs/context-economy-preview";
 const PUBLISHED = readFileSync(join(ROOT, "docs", "release-proof", "0.1.2.md"), "utf8");
 const SHA = "b72867fd12ae562577f9bf96bcc0ee85362c1a33";
 
@@ -44,7 +46,7 @@ const PLATFORMS = [
   { platform: "macos-arm64", heading: "macOS arm64", home: "/Users/e1b2" },
   { platform: "linux-x86_64", heading: "Linux x86_64", home: "/home/e1b2" },
 ];
-const ctxFor = (p) => ({ env: { HOME: p.home }, sha: SHA, vars: { V: "0.1.2", platform: p.platform, staging: STAGING }, proofs: [toolGateway], step: { id: "replay" } });
+const ctxFor = (p) => ({ env: { HOME: p.home }, sha: SHA, vars: { V: "0.1.2", platform: p.platform, staging: REPLAY_STAGING }, proofs: [toolGateway], step: { id: "replay" } });
 
 /** Applies a step's `match` and `notMatch` assertions to recorded text. Returns the list of failures. */
 function replay(step, text, ctx) {
@@ -66,7 +68,7 @@ test("the E1a step data passes up-front validation, with unique ids", () => {
 
 for (const p of PLATFORMS) {
   test(`replay: the published ${p.heading} output passes the steps' assertions`, () => {
-    const steps = e1aSteps({ V: "0.1.2", platform: p.platform, staging: STAGING });
+    const steps = e1aSteps({ V: "0.1.2", platform: p.platform, staging: REPLAY_STAGING });
     const ctx = ctxFor(p);
     const replayed = [];
     for (const [id, heading] of Object.entries(REPLAY)) {
@@ -83,7 +85,7 @@ for (const p of PLATFORMS) {
 }
 
 test("replay: a changed published output fails the assertion (the replay is not vacuous)", () => {
-  const steps = e1aSteps({ V: "0.1.2", platform: "macos-arm64", staging: STAGING });
+  const steps = e1aSteps({ V: "0.1.2", platform: "macos-arm64", staging: REPLAY_STAGING });
   const ctx = ctxFor(PLATFORMS[0]);
   const text = (id) => section("macOS arm64", REPLAY[id]);
   const step = (id) => steps.find((s) => s.id === id);
