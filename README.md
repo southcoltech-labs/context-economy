@@ -22,14 +22,14 @@ It starts no network connection or model call of its own. See [SECURITY.md](SECU
 
 **RTK's own integrations.** RTK has its own setup for both hosts (`rtk init -g` for Claude Code, `rtk init -g --agent pi` for Pi). If you only want shorter command output, that is the simpler choice. tool-gateway adds: RTK only from an absolute path you name, checked before every use; a strict grammar for what a rewrite may run; one metadata-only ledger across both hosts; and releases that are checked on both hosts before they reach the `release` channel. The output reduction itself is RTK's.
 
-**Status: pre-release.** No version has been released yet. The steps below are what the first release is checked against, on both hosts, before it is published.
+**Status:** `v0.1.2` is the first public release. See [Releases and tags](#releases-and-tags) for which version to install.
 
 ## Supported environment
 
 | Item | Supported |
 | --- | --- |
 | OS | macOS on Apple silicon (arm64), Linux x86_64. Windows is not supported |
-| Hosts | Claude Code (tested with 2.1.310), Pi (tested with 1.0.2) |
+| Hosts | Claude Code or Pi, or both, installed before you start. Each release's notes list the versions it was tested with; `v0.1.2`: Claude Code 2.1.323 and 2.1.325, Pi 1.5.0 and 1.5.2 |
 | RTK | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 0.47.0 or later, below 1.0.0, at an absolute path you name |
 
 ## 1. Configure RTK
@@ -69,6 +69,8 @@ It must end by printing `rtk 0.47.0` and the path to put in `rtk.path`. A differ
   "rtk": { "path": "/Users/you/.local/opt/rtk-0.47.0/rtk" }
 }
 ```
+
+Replace the example path with the one the RTK block printed after `rtk.path:`. It starts with your own home folder: `/Users/<your account>/` on macOS, `/home/<your account>/` on Linux.
 
 The environment variable `CE_RTK_BIN` takes precedence over the file. In Claude Code, set it under `env` in `~/.claude/settings.json`; for Pi, export it in the shell that starts Pi.
 
