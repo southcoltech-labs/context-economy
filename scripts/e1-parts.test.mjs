@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateSteps } from "./e1-run.mjs";
+import { resolveSteps, validateSteps } from "./e1-run.mjs";
 import { e1aSteps } from "./e1-parts.mjs";
 import toolGateway from "./proof/tool-gateway.mjs";
 
@@ -51,7 +51,8 @@ const ctxFor = (p) => ({ env: { HOME: p.home }, sha: SHA, vars: { V: "0.1.2", pl
 /** Applies a step's `match` and `notMatch` assertions to recorded text. Returns the list of failures. */
 function replay(step, text, ctx) {
   const failures = [];
-  for (const a of step.expect ?? []) {
+  const expects = typeof step.expect === "function" ? step.expect(ctx) : step.expect;
+  for (const a of expects ?? []) {
     if (a.match instanceof RegExp && !a.match.test(text)) failures.push(`${step.id}: ${a.match} not found`);
     if (typeof a.match === "function") {
       const r = a.match(text, ctx);
@@ -63,7 +64,9 @@ function replay(step, text, ctx) {
 }
 
 test("the E1a step data passes up-front validation, with unique ids", () => {
-  validateSteps(e1aSteps({ V: "0.1.3", platform: "macos-arm64", staging: STAGING }));
+  const vars = { V: "0.1.3", platform: "macos-arm64", staging: STAGING };
+  validateSteps(resolveSteps({ proofs: [toolGateway] }, e1aSteps(vars)));
+  assert.throws(() => validateSteps(e1aSteps(vars)), /still there after resolution/, "an unresolved placeholder is never accepted");
 });
 
 for (const p of PLATFORMS) {
@@ -109,10 +112,12 @@ test("every human step has the evidence of its proof module entry; the steps not
   assert.deepEqual(human.map((s) => s.id), ["E1a.4a", "E1a.4b", "E1a.6b", "E1a.6c"]);
   for (const s of human) {
     const h = s.human(ctx);
-    assert.equal(h.evidence.command, "git status");
-    assert.match(h.evidence.ledgerDir, /^\.claude\/context-economy\/gateway-ledger/);
+    assert.equal(h.entries.length, 1);
+    assert.equal(h.entries[0].plugin, "tool-gateway");
+    assert.equal(h.entries[0].evidence.command, "git status");
+    assert.match(h.entries[0].evidence.ledgerDir, /^\.claude\/context-economy\/gateway-ledger/);
   }
-  assert.deepEqual(steps.filter((s) => !s.human && !REPLAY[s.id]).map((s) => s.id), []);
+  assert.deepEqual(steps.filter((s) => !s.human && !s.expand && !REPLAY[s.id]).map((s) => s.id), []);
 });
 
 // --- the whole E1a part against fake commands and fake hosts ---------------------------------------

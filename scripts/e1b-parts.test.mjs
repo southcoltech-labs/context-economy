@@ -50,6 +50,8 @@ function world(over = {}) {
     if (cmd === "git" && args[0] === "ls-remote") return ok(w.bTagged ? `${SHA_B}\trefs/tags/v${B}\n` : "");
     if (cmd === "git" && args[0] === "show") {
       const [ref, file] = args[1].split(":");
+      // The compatibility preflight reads the marketplace at a tag: by default the clone's own, so the drill's versions list the same plugins.
+      if (file === ".claude-plugin/marketplace.json") return ok(w.marketplaceAt?.[ref] ?? readFileSync(join(clone, ".claude-plugin", "marketplace.json"), "utf8"));
       const version = w.fileVersion?.[args[1]] ?? (ref === "origin/main" ? w.mainVersion : w.releaseVersion);
       return ok(`{\n  "name": "x",\n  "version": "${version}"\n}\n`);
     }
@@ -412,24 +414,46 @@ const proofDirWith = (files) => {
 };
 const twoPlugins = (w) => writeFileSync(join(w.clone, ".claude-plugin", "marketplace.json"), JSON.stringify({ name: "context-economy", plugins: [{ name: "tool-gateway", source: "./a" }, { name: "second-plugin", source: "./b" }] }));
 
-test("S4: two plugins shipping to Claude Code is a stop, not a guess", async () => {
-  const w = world({ deps: { proofDir: proofDirWith({
-    "tool-gateway": (t) => t,
-    "second-plugin": (t) => t.replace('name: "tool-gateway"', 'name: "second-plugin"').replaceAll("gateway-ledger", "second-ledger").replace(/dataLeft: .*/, 'dataLeft: ["config.json", "second-ledger", "second-ledger-pi"],'),
-  }) } });
-  twoPlugins(w);
-  assert.equal(await w.part("baseline"), 1);
-  assert.match(dieWith(w), /exactly one plugin shipping to Claude Code/);
-  assert.equal(w.hosts.length, 0);
+const MARKET = (names) => JSON.stringify({ name: "context-economy", plugins: names.map((n) => ({ name: n, source: `./plugins/${n}` })) });
+const showsOf = (w) => w.execs.filter((e) => e.cmd === "git" && e.args[0] === "show" && /marketplace\.json/.test(e.args[1])).map((e) => e.args[1].split(":")[0]);
+
+test("S4: the baseline preflight reads the marketplace at A's tag only, and goes on when it matches the proof modules", async () => {
+  const w = world();
+  assert.equal(await w.part("baseline"), 0, dieWith(w));
+  assert.match(w.transcript(), /PF Compatibility preflight/);
+  assert.deepEqual(showsOf(w), [`v${A}`]);
 });
 
-test("S4: two behaviour entries for one host is a stop at the host step", async () => {
+test("S4: a marketplace at A's tag whose plugins differ from the proof modules stops before any install, host launch or state change", async () => {
+  const w = world();
+  w.marketplaceAt = { [`v${A}`]: MARKET(["tool-gateway", "second-plugin"]) };
+  assert.equal(await w.part("baseline"), 1);
+  assert.match(dieWith(w), /STOP at PF/);
+  assert.match(dieWith(w), /second-plugin/);
+  assert.equal(w.hosts.length, 0);
+  assert.ok(!w.execs.some((e) => e.cmd === "claude" && e.args[0] === "plugin"), "nothing was installed");
+  assert.ok(!w.execs.some((e) => e.cmd === "pi" && e.args[0] === "install"));
+  assert.ok(!existsSync(join(w.deps.runsDir, DRILL, "drill-state.json")), "no drill state was written");
+});
+
+test("S4: `undelivered` also checks B's tag, and a mismatch there stops that part before it touches the host", async () => {
+  const w = world();
+  assert.equal(await w.part("baseline"), 0, dieWith(w));
+  const from = w.execs.length;
+  w.marketplaceAt = { [`v${B}`]: MARKET(["tool-gateway", "second-plugin"]) };
+  w.err.length = 0;
+  assert.equal(await w.part("undelivered", ["--b", B]), 1);
+  assert.match(dieWith(w), /STOP at PF/);
+  assert.deepEqual(showsOf(w).slice(1), [`v${A}`, `v${B}`]);
+  assert.ok(!w.execs.slice(from).some((e) => (e.cmd === "claude" && e.args[0] === "plugin") || (e.cmd === "pi" && e.args[0] === "install")));
+});
+
+test("S4: two behaviour entries for one host is a load-time stop that names the host", async () => {
   const w = world({ deps: { proofDir: proofDirWith({
     "tool-gateway": (t) => t.replace('    { host: "pi", command: "git status", result: 1,', '    { host: "claude", command: "git status", result: 1, ledger: { rows: 1, rewrite: "applied", is_error: false } },\n    { host: "pi", command: "git status", result: 1,'),
   }) } });
   assert.equal(await w.part("baseline"), 1);
-  assert.match(dieWith(w), /STOP at A\.4a/);
-  assert.match(dieWith(w), /exactly one behaviour entry for claude/);
+  assert.match(dieWith(w), /more than one call entry for claude/);
   assert.equal(w.hosts.length, 0);
 });
 
@@ -465,7 +489,7 @@ test("S6: a baseline without --b says in the transcript that B was not checked; 
 test("S7: a ledger folder that is not directly under ~/.claude/context-economy/ is a stop, not a read in the wrong place", () => {
   const steps = baselineSteps({ part: "baseline", a: A });
   const check = steps.find((s) => s.id === "A.4c").expect[0].match;
-  const proof = (dirs) => ({ name: "x", hosts: ["claude"], ledgerDirs: dirs, behaviour: [], uninstall: [], dataLeft: [] });
+  const proof = (dirs) => ({ name: "x", hosts: ["claude"], ledgerDirs: dirs, behaviour: [{ host: "claude", command: "x", result: 1, ledger: { rows: 1 } }], uninstall: [], dataLeft: [] });
   const out = "gateway-ledger: 1 rows\nledger check: OK\n";
   for (const d of [".claude/elsewhere/gateway-ledger", ".claude/context-economy/sub/gateway-ledger", "gateway-ledger"]) {
     assert.throws(() => check(out, { proofs: [proof({ claude: d })], step: { id: "A.4c" }, env: { HOME: "/h" } }), (e) => e instanceof StopError && /directly under ~\/\.claude\/context-economy\//.test(e.message), d);

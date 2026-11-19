@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { HOSTS, HostVersions, main, newAttempt, loadProofModules, parseVersionLine, realExec, realLaunchHost, realUi } from "./e1-run.mjs";
+import { AbortError, HOSTS, HostVersions, main, newAttempt, loadProofModules, parseVersionLine, realExec, realLaunchHost, realUi } from "./e1-run.mjs";
 import { ALLOWED_VARIABLES, REFUSED_VARIABLES, passEnvNames } from "./e1-helpers.mjs";
 import { appendFileSync } from "node:fs";
 import proofToolGateway from "./proof/tool-gateway.mjs";
@@ -1466,5 +1466,198 @@ test("isEntry: true for the script's own url, false for another file, a missing 
     assert.equal(isEntry(pathToFileURL(join(dir, "b.mjs")).href, file), false, "another module");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- several plugins in one host session, visual evidence, the off-switch environment (design: E1 driver, several plugins) ---------
+
+const GATE = { plugin: "gate", kind: "call", evidence: BEHAVIOUR_EVID };
+const BAR = { plugin: "bar", kind: "visual", expect: ["a coloured bar above the prompt", "the bar shrank after /bar min"] };
+const OTHER_EVID = { kind: "behaviour", command: "echo hi", result: 2, ledgerDir: ".claude/context-economy/other-ledger", ledger: { rows: 0 } };
+const OTHER = { plugin: "other", kind: "call", evidence: OTHER_EVID };
+const multiStep = (entries, extra = {}, human = {}) => [{ id: "H", human: { host: "pi", say: ["do it"], entries, ...human }, ...extra }];
+/** Answers by question: the call questions as DEFAULT_ANSWERS, "yes" to each statement, a description. */
+const MULTI_ANSWERS = (q) => (/^Did you see/.test(q) ? "yes" : /^Describe/.test(q) ? "a bar above the prompt" : /result/i.test(q) ? "1" : /permission prompt/i.test(q) ? "no prompt" : "git status");
+
+test("several entries: the call questions come first, then the statements; every answer is labelled; one verdict line per entry", async () => {
+  const w = world();
+  w.deps.launchHost = async () => { addRow(w); return { code: 0, signal: null }; };
+  w.answer = MULTI_ANSWERS;
+  w.parts.e1a = () => multiStep([BAR, GATE]);
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.deepEqual(w.asked.map((q) => q.replace(/^(.{14}).*$/, "$1")), ["What did you t", "What command d", "What was the r", "Did a permissi", "Did you see: a", "Did you see: t", "Describe in a "]);
+  const t = raw(w);
+  assert.match(t, /\[planned H: pi bar visual; pi gate call\]/);
+  assert.match(t, /ATTESTED H gate Q: What did you type\?/);
+  assert.match(t, /ATTESTED H bar Q: Did you see: a coloured bar above the prompt\? \(yes\/no\)\nATTESTED H bar A: yes/);
+  assert.match(t, /ATTESTED H bar A: a bar above the prompt/);
+  assert.match(t, /\[evidence H \(pi, gate call\): attested pass\]/);
+  assert.match(t, /\[evidence H \(pi, bar visual\): attested pass\]/);
+  assert.equal(t.trimEnd().split("\n").at(-1), "1 host step (2 checks), 1 attested");
+});
+test("a valid `no` fails the entry at once, is never asked again, and the stop names every failed entry (the ledger is not overridden by yes answers)", async () => {
+  const w = world();
+  w.answer = (q) => (/^Did you see: a coloured/.test(q) ? "no" : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([GATE, BAR]); // no ledger row is written: GATE fails too
+  assert.equal(await e1a(w), 1);
+  assert.equal(w.asked.filter((q) => /^Did you see/.test(q)).length, 1, "the `no` is final: the second statement and the description are not asked");
+  assert.ok(!w.asked.some((q) => /^Describe/.test(q)));
+  const e = w.err.join("\n");
+  assert.match(e, /gate call: .*expected 1 new ledger row, found 0/);
+  assert.match(e, /bar visual: the operator did not see: a coloured bar above the prompt/);
+  assert.match(raw(w), /ATTESTED H bar A: no/);
+});
+test("an answer that is neither yes nor no is asked again; every try is in the transcript; three bad tries fail", async () => {
+  const w = world();
+  let n = 0;
+  w.answer = (q) => (/^Did you see: a coloured/.test(q) ? ["maybe", "yes"][n++] : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.match(raw(w), /ATTESTED H A: maybe\nATTESTED H Q: Did you see: a coloured bar above the prompt\? \(yes\/no\)\nATTESTED H A: yes/);
+  const w2 = world();
+  w2.answer = (q) => (/^Did you see: a coloured/.test(q) ? "maybe" : MULTI_ANSWERS(q));
+  w2.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w2), 1);
+  assert.equal(w2.asked.filter((q) => /^Did you see/.test(q)).length, 3);
+  assert.match(w2.err.join("\n"), /no valid yes\/no answer/);
+});
+test("an empty description three times fails the visual entry", async () => {
+  const w = world();
+  w.answer = (q) => (/^Describe/.test(q) ? "  " : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 1);
+  assert.equal(w.asked.filter((q) => /^Describe/.test(q)).length, 3);
+  assert.match(w.err.join("\n"), /no description/);
+});
+test("an interrupt at a visual question aborts the part (exit 130), and the answers so far are in the transcript", async () => {
+  const w = world();
+  w.deps.ui.ask = async (q) => { w.asked.push(q); if (/^Did you see: the bar shrank/.test(q)) throw new AbortError("interrupted at a question"); return MULTI_ANSWERS(q); };
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 130);
+  assert.match(raw(w), /ATTESTED H A: yes/);
+  assert.match(raw(w), /aborted at step H/);
+});
+test("machine path, two call entries: each takes its own call; a missing second call fails that entry only", async () => {
+  const w = world();
+  const model = modelOf();
+  const secondCall = { command: "echo hi", startedAt: Date.parse("2026-11-14T10:00:02Z"), endedAt: Date.parse("2026-11-14T10:00:03Z"), isError: false, refused: false, output: "On branch main\n" };
+  const both = { sessions: [{ ...model.sessions[0], calls: [...model.sessions[0].calls, secondCall] }] };
+  w.deps.sessionReader = reader(both);
+  slowHost(w);
+  w.parts.e1a = () => multiStep([GATE, OTHER]);
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.equal(w.asked.length, 0);
+  assert.match(raw(w), /\[evidence H \(pi, other call\): machine pass\]/);
+  const w2 = world();
+  w2.deps.sessionReader = reader(model);
+  slowHost(w2);
+  w2.parts.e1a = () => multiStep([GATE, OTHER]);
+  assert.equal(await e1a(w2), 1);
+  assert.match(raw(w2), /\[evidence H \(pi, gate call\): machine pass\]/);
+  assert.match(w2.err.join("\n"), /other call: no call with command `echo hi`/);
+  assert.ok(!/gate call:/.test(w2.err.join("\n")), "the first entry passed and is not named as failed");
+});
+test("two call entries with one command, or one ledger folder, in one session is step data that cannot run", async () => {
+  for (const second of [{ ...GATE, plugin: "dup", evidence: { ...BEHAVIOUR_EVID, ledgerDir: ".claude/context-economy/dup-ledger" } }, { ...GATE, plugin: "dup", evidence: { ...BEHAVIOUR_EVID, command: "git log" } }]) {
+    const w = world();
+    w.parts.e1a = () => multiStep([GATE, second]);
+    assert.equal(await e1a(w), 1);
+    assert.match(w.err.join("\n"), /two call entries/);
+    assert.deepEqual(w.asked, []);
+  }
+});
+test("a row in a ledger folder nobody owns in the session fails the step, whatever the entries say", async () => {
+  const w = world();
+  w.deps.launchHost = async () => { addRow(w); mkdirSync(join(w.home, ".claude", "context-economy", "gateway-ledger"), { recursive: true }); writeFileSync(join(w.home, ".claude", "context-economy", "gateway-ledger", "s-9-0.jsonl"), `${JSON.stringify({ ts: "2026-11-14T10:00:01Z", rewrite: "applied", is_error: false })}\n`); return { code: 0, signal: null }; };
+  w.answer = MULTI_ANSWERS;
+  w.parts.e1a = () => multiStep([GATE, BAR]);
+  assert.equal(await e1a(w), 1);
+  assert.match(w.err.join("\n"), /unexpected ledger rows in \.claude\/context-economy\/gateway-ledger: 1 new/);
+  assert.match(raw(w), /\[evidence H \(pi, gate call\): attested pass\]/);
+});
+test("a row in a folder of a plugin that is not installed (a visual-only session) fails; unchanged retained folders pass", async () => {
+  const w = world();
+  w.answer = MULTI_ANSWERS;
+  w.deps.launchHost = async () => { const d = join(w.home, ".claude", "context-economy", "gateway-ledger-pi"); mkdirSync(d, { recursive: true }); appendFileSync(join(d, "s-1-0.jsonl"), `${JSON.stringify({ ts: "2026-11-14T10:00:01Z" })}\n`); return { code: 0, signal: null }; };
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 1);
+  assert.match(w.err.join("\n"), /unexpected ledger rows in \.claude\/context-economy\/gateway-ledger-pi/);
+  const w2 = world();
+  w2.answer = MULTI_ANSWERS;
+  mkdirSync(join(w2.home, ".claude", "context-economy", "gateway-ledger-pi"), { recursive: true });
+  appendFileSync(join(w2.home, ".claude", "context-economy", "gateway-ledger-pi", "s-0-0.jsonl"), `${JSON.stringify({ ts: "2026-11-14T08:00:00Z" })}\n`);
+  w2.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w2), 0, w2.err.join("\n"));
+});
+test("the off-switch environment reaches that host launch only: not the next launch, a helper, or the driver's environment; it is in the transcript", async () => {
+  const w = world();
+  const launches = [];
+  w.deps.launchHost = async (host, o) => { launches.push(o.env); return { code: 0, signal: null }; };
+  w.answer = MULTI_ANSWERS;
+  w.parts.e1a = () => [
+    { id: "H1", human: { host: "pi", say: ["x"], entries: [BAR], env: { CE_BAR: "off" } } },
+    { id: "H2", human: { host: "pi", say: ["y"], entries: [BAR] } },
+    { id: "X", run: [["helper"]] },
+  ];
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.equal(launches[0].CE_BAR, "off");
+  assert.equal(launches[1].CE_BAR, undefined);
+  assert.equal(w.deps.env.CE_BAR, undefined);
+  assert.equal(w.execs.find((e) => e.cmd === "helper").env.CE_BAR, undefined);
+  assert.notEqual(launches[0], launches[1]);
+  assert.match(raw(w), /\[host env: CE_BAR=off\]/);
+});
+test("an off-switch environment that is not CE_* with a short string value is step data that cannot run", async () => {
+  for (const env of [{ bar: "off" }, { CE_BAR: "a-value-that-is-too-long" }, { CE_BAR: 1 }, {}]) {
+    const w = world();
+    w.parts.e1a = () => multiStep([BAR], {}, { env });
+    assert.equal(await e1a(w), 1, JSON.stringify(env));
+    assert.match(w.err.join("\n"), /human\.env/);
+  }
+});
+test("a step with `expand` is replaced by the steps it returns once the proof modules are loaded; an `expect` function is resolved per run", async () => {
+  const w = world();
+  w.parts.e1a = () => [
+    { id: "X", expand: (ctx) => ctx.proofs.map((m) => ({ id: `X.${m.name}`, run: [["echo", m.name]], expect: (c) => [{ cmd: 0, match: new RegExp(c.proofs[0].name) }] })) },
+  ];
+  w.onExec = (cmd, args) => ({ code: 0, out: `${args[0]}\n` });
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.match(raw(w), /=== X\.tool-gateway /);
+  const w2 = world();
+  w2.parts.e1a = () => [{ id: "X", expand: () => "not a list" }];
+  assert.equal(await e1a(w2), 1);
+  assert.match(w2.err.join("\n"), /expand\(\) did not return a list/);
+});
+
+// --- review 144: unresolved or mixed expansions stop; every declared ledger path is validated -------------------------------
+
+test("review 144 P2-1: a nested expansion stops before any command runs, so its failing check cannot pass unseen", async () => {
+  const w = world();
+  w.parts.e1a = () => [{ id: "outer", expand: () => [{ id: "inner", expand: () => [{ id: "check", run: [["failing-check"]], expect: [] }] }] }];
+  w.onExec = (cmd) => (cmd === "failing-check" ? { code: 1, out: "bad\n" } : { code: 0, out: "" });
+  assert.equal(await e1a(w), 1);
+  assert.match(w.err.join("\n"), /still there after resolution/);
+  assert.ok(!w.execs.some((e) => e.cmd === "failing-check"));
+  assert.deepEqual(w.events.filter((e) => e.startsWith("host:")), []);
+});
+test("review 144 P2-1: a placeholder that also carries run, human or expect fields stops; a non-function expand stops", async () => {
+  for (const step of [{ id: "m", expand: () => [], run: [["never"]] }, { id: "m", expand: () => [], human: { host: "pi" } }, { id: "m", expand: () => [], expect: [] }, { id: "m", expand: "later" }]) {
+    const w = world();
+    w.parts.e1a = () => [step];
+    assert.equal(await e1a(w), 1, JSON.stringify(Object.keys(step)));
+    assert.ok(!w.execs.some((e) => e.cmd === "never"));
+  }
+});
+const visualModule = (dirs) => ({ name: "tool-gateway", hosts: ["claude", "pi"], ledgerDirs: dirs, behaviour: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["a band"] })), uninstall: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["no band"] })), dataLeft: [] });
+async function loadVisual(dirs) {
+  const dir = tmp("e1-vis-");
+  writeFileSync(join(dir, "tool-gateway.mjs"), `export default ${JSON.stringify(visualModule(dirs))};\n`);
+  return loadProofModules(MARKETPLACE, dir);
+}
+test("review 144 P2-2: a visual-only module's retained ledger folder is validated like a call entry's", async () => {
+  const ok = await loadVisual({ claude: ".claude/context-economy/retained", pi: ".claude/context-economy/retained-pi" });
+  assert.equal(ok[0].ledgerDirs.claude, ".claude/context-economy/retained");
+  for (const bad of ["../../outside", "/etc", ".claude/../../x", ".", "./a", ".claude/context-economy/..", "a//b", "", "A/b", ".claude/context-economy/a..b"]) {
+    await assert.rejects(loadVisual({ claude: bad }), (e) => e.name === "StopError" || /StopError/.test(e.constructor.name), `rejects ${JSON.stringify(bad)}`);
   }
 });

@@ -41,7 +41,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PLATFORMS } from "./check-release-proof.mjs";
 import { allowedEnv, passEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
-import { QUESTIONS, askQuestions, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
+import { QUESTIONS, askQuestions, askVisual, evaluate, evaluateAttested, ledgerCursor, ledgerDirProblem, ledgerWindow, validModel, validateEvidence, validateVisual } from "./e1-evidence.mjs";
 import { isEntry } from "./entry.mjs";
 import { hitsReport, overlaps, scrub } from "./e1-scrub.mjs";
 import { HOSTS, HostVersions, StopError, asText, clip, evidenceFor, parseVersionLine, readHostVersions } from "./e1-core.mjs";
@@ -94,9 +94,82 @@ class Transcript {
 
 // --- proof modules -------------------------------------------------------------------------------
 
+const ENTRY_KINDS = ["call", "visual"];
+const CALL_KEYS = ["host", "kind", "command", "result", "ledger"];
+const OFFSWITCH_KEYS = ["env", "checks"];
+const ENV_NAME = /^CE_[A-Z0-9_]+$/;
+const MAX_SAY_LINES = 8;
+
+/** Why an off-switch environment is not acceptable, or undefined. Names are `CE_*`, values short strings. */
+export function envProblem(env) {
+  if (!env || typeof env !== "object" || Array.isArray(env)) return "env is not an object";
+  const keys = Object.keys(env);
+  if (!keys.length) return "env has no variable";
+  for (const k of keys) {
+    if (!ENV_NAME.test(k)) return `env name ${JSON.stringify(k)} is not CE_ followed by A-Z, 0-9 or _`;
+    if (typeof env[k] !== "string" || env[k].length > 16) return `env value of ${k} is not a string of at most 16 characters`;
+  }
+  return undefined;
+}
+
+/** One `behaviour`, `uninstall` or off-switch `checks` entry of a module, as a reason string, or undefined when it is valid. */
+function entryProblem(m, e, where) {
+  if (!e || typeof e !== "object" || Array.isArray(e)) return `${where} is not an object`;
+  if (!m.hosts.includes(e.host)) return `${where} names host ${JSON.stringify(e.host)}, which is not one of the module's hosts`;
+  const kind = e.kind ?? "call";
+  if (!ENTRY_KINDS.includes(kind)) return `${where} has unknown kind ${JSON.stringify(e.kind)}`;
+  if (kind === "visual") {
+    for (const k of ["ledger", "command", "result"]) if (e[k] !== undefined) return `${where} is a visual entry and has \`${k}\``;
+    const bad = validateVisual(e);
+    return bad ? `${where}: ${bad}` : undefined;
+  }
+  const unknown = Object.keys(e).filter((k) => !CALL_KEYS.includes(k));
+  if (unknown.length) return `${where} has unknown field ${unknown.join(", ")} for a call entry`;
+  if (typeof m.ledgerDirs[e.host] !== "string") return `${where} is a call entry for ${e.host}, which has no ledgerDirs entry`;
+  const bad = validateEvidence(evidenceFor(m, e, "proof"));
+  return bad ? `${where}: ${bad}` : undefined;
+}
+
+/** What is wrong with one proof module's own shape, or undefined. `name` is the marketplace's name for it. */
+function moduleProblem(m, name) {
+  if (!m || typeof m !== "object" || m.name !== name || !Array.isArray(m.hosts) || m.hosts.some((h) => !HOSTS.includes(h))) return "another shape";
+  if (m.ledgerDirs !== undefined && (!m.ledgerDirs || typeof m.ledgerDirs !== "object" || Array.isArray(m.ledgerDirs) || Object.entries(m.ledgerDirs).some(([h, d]) => !HOSTS.includes(h) || typeof d !== "string"))) return "ledgerDirs is not { host: folder }";
+  for (const [h, d] of Object.entries(m.ledgerDirs ?? {})) { const bad = ledgerDirProblem(d); if (bad) return `ledgerDirs.${h} ${bad}`; }
+  if (!Array.isArray(m.behaviour) || !Array.isArray(m.uninstall) || !Array.isArray(m.dataLeft) || m.dataLeft.some((f) => typeof f !== "string")) return "another shape";
+  const norm = { ...m, ledgerDirs: m.ledgerDirs ?? {} };
+  const lists = { behaviour: m.behaviour, uninstall: m.uninstall };
+  if (m.offSwitch !== undefined) {
+    const o = m.offSwitch;
+    if (!o || typeof o !== "object" || Array.isArray(o)) return "offSwitch is not an object";
+    const unknown = Object.keys(o).filter((k) => !OFFSWITCH_KEYS.includes(k));
+    if (unknown.length) return `offSwitch has unknown field ${unknown.join(", ")}`;
+    const bad = envProblem(o.env);
+    if (bad) return `offSwitch ${bad}`;
+    if (!Array.isArray(o.checks) || !o.checks.length) return "offSwitch is declared with no checks (it must check every host of the module)";
+    lists["offSwitch.checks"] = o.checks;
+  }
+  for (const [list, entries] of Object.entries(lists)) {
+    for (const [i, e] of entries.entries()) {
+      const bad = entryProblem(norm, e, `${list}[${i}]`);
+      if (bad) return bad;
+    }
+    for (const h of m.hosts) {
+      const mine = entries.filter((e) => e.host === h);
+      if (mine.filter((e) => (e.kind ?? "call") === "call").length > 1) return `${list} has more than one call entry for ${h} (each session has at most one call entry per ledger folder)`;
+      if (!mine.length) return `${list} has no entry for ${h}`;
+    }
+  }
+  return undefined;
+}
+
+/** The lines a host session would ask the operator to do, for the size limit: each visual `say` line and one per call entry. */
+const sayLines = (entries) => entries.reduce((n, e) => n + ((e.kind ?? "call") === "visual" ? e.say.length : 1), 0);
+
 /**
  * Every plugin in marketplace.json needs a proof module in `dir`: a listed plugin without one is a
- * stop, never a skip. A module is `{ name, hosts, behaviour, dataLeft }`.
+ * stop, never a skip. A module (version 2) is `{ name, hosts, ledgerDirs?, behaviour, uninstall, offSwitch?, dataLeft }`;
+ * an entry is a `call` (the default: a ledger-checked command) or a `visual` (statements the operator confirms by sight).
+ * The cross-module rules (one owner per ledger folder, a session of at most 8 lines) are checked here too.
  */
 export async function loadProofModules(marketplace, dir = join(HERE, "proof"), importModule = (f) => import(pathToFileURL(f).href)) {
   const modules = [];
@@ -105,13 +178,23 @@ export async function loadProofModules(marketplace, dir = join(HERE, "proof"), i
     const file = join(dir, `${name}.mjs`);
     if (!existsSync(file)) throw new StopError({ step: "proof modules", expected: `scripts/proof/${name}.mjs for plugin ${name} listed in marketplace.json`, got: "no such module (a listed plugin is never skipped)" });
     const m = (await importModule(file)).default;
-    const bad = !m || m.name !== name || !Array.isArray(m.hosts) || m.hosts.some((h) => !HOSTS.includes(h))
-      || !m.ledgerDirs || typeof m.ledgerDirs !== "object" || m.hosts.some((h) => typeof m.ledgerDirs[h] !== "string")
-      || !Array.isArray(m.behaviour) || !Array.isArray(m.uninstall)
-      || !Array.isArray(m.dataLeft) || m.dataLeft.some((f) => typeof f !== "string")
-      || [...m.behaviour, ...m.uninstall].some((e) => !m.hosts.includes(e?.host) || validateEvidence(evidenceFor(m, e, "proof")) !== undefined);
-    if (bad) throw new StopError({ step: "proof modules", expected: `scripts/proof/${name}.mjs exporting { name: "${name}", hosts, ledgerDirs, behaviour, uninstall, dataLeft }`, got: "another shape" });
-    modules.push(m);
+    const bad = moduleProblem(m, name);
+    if (bad) throw new StopError({ step: "proof modules", expected: `scripts/proof/${name}.mjs exporting { name: "${name}", hosts, ledgerDirs?, behaviour, uninstall, offSwitch?, dataLeft }`, got: bad });
+    modules.push({ ...m, ledgerDirs: m.ledgerDirs ?? {} });
+  }
+  const stop = (m, got) => new StopError({ step: "proof modules", expected: `scripts/proof/${m.name}.mjs consistent with the other modules`, got });
+  const owner = new Map();
+  for (const m of modules) for (const d of new Set(Object.values(m.ledgerDirs))) {
+    if (owner.has(d) && owner.get(d) !== m.name) throw stop(m, `the ledger folder ${d} is claimed by ${owner.get(d)} and ${m.name} (every ledger folder has exactly one owner)`);
+    owner.set(d, m.name);
+  }
+  for (const m of modules) for (const h of m.hosts) {
+    const others = modules.filter((o) => o !== m && o.hosts.includes(h));
+    const mine = (list) => list.filter((e) => e.host === h);
+    const sessions = [["behaviour", sayLines(modules.filter((o) => o.hosts.includes(h)).flatMap((o) => mine(o.behaviour)))],
+      ["uninstall", sayLines(modules.filter((o) => o.hosts.includes(h)).flatMap((o) => mine(o.uninstall)))]];
+    if (m.offSwitch) sessions.push(["off-switch", sayLines([...mine(m.offSwitch.checks), ...others.flatMap((o) => mine(o.behaviour))])]);
+    for (const [phase, n] of sessions) if (n > MAX_SAY_LINES) throw stop(m, `the ${phase} session for ${h} would carry ${n} lines of instructions, more than ${MAX_SAY_LINES}`);
   }
   return modules;
 }
@@ -192,7 +275,7 @@ export function defaultDeps(env = process.env) {
 
 // --- step data validation (E1, E2) -----------------------------------------------------------------
 
-const STEP_KEYS = ["id", "title", "run", "cwd", "expect", "human", "pause", "after", "set"];
+const STEP_KEYS = ["id", "title", "run", "cwd", "expect", "human", "pause", "after", "set", "tag", "expand"];
 const EXPECT_KEYS = ["cmd", "code", "match", "notMatch", "describe"];
 const dataStop = (where, got) => new StopError({ step: `step data ${where}`, expected: "valid step data (an assertion that cannot run would pass silently)", got });
 
@@ -213,13 +296,47 @@ function validateExpect(step, where, ncmds) {
   }
 }
 
+const ENTRY_KEYS = ["plugin", "kind", "evidence", "expect"];
+
+/** A human step's `entries` (several plugins in one session): each a ledger-checked `call` or a `visual`, and no two sharing a command or a ledger folder. */
+function validateEntries(h, where) {
+  if (!Array.isArray(h.entries) || !h.entries.length) throw dataStop(where, "human.entries is not a non-empty list");
+  const commands = new Set(), folders = new Set();
+  for (const [i, e] of h.entries.entries()) {
+    const at = `${where} entries[${i}]`;
+    if (!e || typeof e !== "object" || Array.isArray(e)) throw dataStop(at, "not an object");
+    const unknown = Object.keys(e).filter((k) => !ENTRY_KEYS.includes(k));
+    if (unknown.length) throw dataStop(at, `unknown key ${unknown.join(", ")}`);
+    if (typeof e.plugin !== "string" || !e.plugin) throw dataStop(at, "no plugin name");
+    if (e.kind === "visual") {
+      if (e.evidence !== undefined) throw dataStop(at, "a visual entry has evidence");
+      const bad = validateVisual({ host: h.host, kind: "visual", say: [], expect: e.expect });
+      if (bad) throw dataStop(at, bad);
+    } else if (e.kind === "call") {
+      if (e.expect !== undefined) throw dataStop(at, "a call entry has expect");
+      const bad = validateEvidence(e.evidence);
+      if (bad) throw dataStop(at, `evidence: ${bad}`);
+      if (commands.has(e.evidence.command)) throw dataStop(at, `two call entries run \`${e.evidence.command}\` in one session (a call could satisfy both)`);
+      if (folders.has(e.evidence.ledgerDir)) throw dataStop(at, `two call entries own the ledger folder ${e.evidence.ledgerDir} in one session`);
+      commands.add(e.evidence.command);
+      folders.add(e.evidence.ledgerDir);
+    } else throw dataStop(at, "kind is neither call nor visual");
+  }
+}
+
 /** A human step needs a host and instructions (E1). */
 function validateHuman(h, where) {
   if (!h || typeof h !== "object") throw dataStop(where, "human is not an object");
   if (!HOSTS.includes(h.host)) throw dataStop(where, `human.host is not ${HOSTS.join(" or ")}`);
   if (!Array.isArray(h.say) || !h.say.length || h.say.some((l) => typeof l !== "string")) throw dataStop(where, "human.say is not a non-empty list of lines");
   if (h.before !== undefined && typeof h.before !== "function") throw dataStop(where, "human.before is not a function");
+  if (h.env !== undefined) { const bad = envProblem(h.env); if (bad) throw dataStop(where, `human.${bad}`); }
   // E2: the evaluator is mandatory for every human step and step data cannot leave it out.
+  if (h.entries !== undefined) {
+    if (h.evidence !== undefined) throw dataStop(where, "human has both evidence and entries");
+    validateEntries(h, where);
+    return;
+  }
   const bad = validateEvidence(h.evidence);
   if (bad) throw dataStop(where, `human.evidence: ${bad}`);
 }
@@ -242,6 +359,7 @@ export function validateSteps(steps) {
     seen.add(step.id);
     const unknown = Object.keys(step).filter((key) => !STEP_KEYS.includes(key));
     if (unknown.length) throw dataStop(where, `unknown key ${unknown.join(", ")}`);
+    if (step.expand !== undefined) throw dataStop(where, "an expand() that is still there after resolution (expansion is one level: an expanded step may not itself expand)");
     if (step.run !== undefined && typeof step.run !== "function") {
       if (!Array.isArray(step.run)) throw dataStop(where, "run is neither a list nor a function");
       for (const c of step.run) {
@@ -249,10 +367,10 @@ export function validateSteps(steps) {
         const fn = c && !Array.isArray(c) && typeof c.label === "string" && typeof c.fn === "function";
         if (!argv && !fn) throw dataStop(where, "a command is neither an argv of strings nor { label, fn }");
       }
-      validateExpect(step, where, step.run.length);
+      if (typeof step.expect !== "function") validateExpect(step, where, step.run.length);
     } else if (typeof step.run === "function") {
-      if (step.expect !== undefined && !Array.isArray(step.expect)) throw dataStop(where, "expect is not a list");
-    } else validateExpect(step, where, 0);
+      if (step.expect !== undefined && !Array.isArray(step.expect) && typeof step.expect !== "function") throw dataStop(where, "expect is not a list");
+    } else if (typeof step.expect !== "function") validateExpect(step, where, 0);
     if (step.after !== undefined && (!Array.isArray(step.after) || step.after.some((f) => typeof f !== "function"))) throw dataStop(where, "after is not a list of functions");
     if (step.set !== undefined && typeof step.set !== "function") throw dataStop(where, "set is not a function");
     if (step.pause !== undefined && step.human !== undefined) throw dataStop(where, "a step is a pause or a host step, not both");
@@ -266,9 +384,27 @@ export function validateSteps(steps) {
   }
 }
 
+/**
+ * A step with `expand: (ctx) => [steps]` is replaced, in place, by what it returns. The steps are built before the proof
+ * modules are loaded, so what depends on which plugins there are (an off-switch session per plugin) is expanded here.
+ */
+export function resolveSteps(ctx, steps) {
+  if (!Array.isArray(steps)) return steps;
+  return steps.flatMap((s) => {
+    if (!s || typeof s !== "object" || typeof s.expand !== "function") return [s];
+    const extra = Object.keys(s).filter((k) => !["id", "title", "expand"].includes(k));
+    if (extra.length) throw dataStop(s.id ?? "(expand)", `a step with expand() also has ${extra.join(", ")} (a placeholder holds nothing else, or its checks would be dropped)`);
+    const made = s.expand(ctx);
+    if (!Array.isArray(made)) throw dataStop(s.id ?? "(expand)", "expand() did not return a list of steps");
+    return made;
+  });
+}
+
 /** Runs `steps`. Throws StopError at the first failed assertion and AbortError when interrupted outside a host. */
 export async function runSteps(ctx, steps) {
   const { deps, transcript } = ctx;
+  steps = resolveSteps(ctx, steps);
+  ctx.steps = steps;
   let hostRunning = false;
   let rejectAbort;
   const aborted = new Promise((_, reject) => { rejectAbort = reject; });
@@ -292,10 +428,12 @@ export async function runSteps(ctx, steps) {
       const fail = (expected, got) => { throw new StopError({ step: `${step.id} ${step.title ?? ""}`.trim(), expected, got: clip(got) }); };
       const results = [];
       const cmds = typeof step.run === "function" ? step.run(ctx) : (step.run ?? []);
+      // `expect` may be a function of ctx when the commands depend on the plugins (one install per plugin).
+      const expects = typeof step.expect === "function" ? step.expect(ctx) : step.expect;
       if (typeof step.run === "function") {
         if (!Array.isArray(cmds)) throw dataStop(step.id, "run() did not return a list");
-        validateExpect(step, step.id, cmds.length);
-      }
+        validateExpect({ ...step, expect: expects }, step.id, cmds.length);
+      } else if (typeof step.expect === "function") validateExpect({ ...step, expect: expects }, step.id, cmds.length);
       for (const [i, cmd] of cmds.entries()) {
         let r;
         if (Array.isArray(cmd)) {
@@ -311,7 +449,7 @@ export async function runSteps(ctx, steps) {
         const offset = transcript.append(out.endsWith("\n") || out === "" ? out : `${out}\n`);
         transcript.append(`[exit ${r.code}]\n`);
         results.push({ code: r.code, out, offset });
-        const mine = (step.expect ?? []).filter((a) => a.cmd === i);
+        const mine = (expects ?? []).filter((a) => a.cmd === i);
         if (!mine.some((a) => a.code !== undefined) && r.code !== 0) fail(`exit code 0 from \`${Array.isArray(cmd) ? cmd.map(quote).join(" ") : cmd.label}\``, `exit code ${r.code}: ${out.trim()}`);
         for (const a of mine) checkExpect(a, results[i], ctx, fail);
       }
@@ -373,10 +511,25 @@ async function pauseStep(ctx, step, { guard, fail }) {
   transcript.append(`[operator confirmed at ${deps.now().toISOString().replace(/\.\d+Z$/, "Z")}]\n`);
 }
 
+/** The entries a host step judges: its `entries` (several plugins), or the one legacy `evidence`. */
+const entriesOf = (h) => h.entries ?? [{ plugin: undefined, kind: "call", evidence: h.evidence }];
+const entryLabel = (h, e) => (e.plugin ? `${h.host} ${e.plugin} ${e.kind}` : `${h.host} ${e.evidence.kind}`);
+
+/**
+ * Every ledger folder of every proof module in the run (installed at the moment or not), and the folders of the step's own
+ * call entries: the session is checked against all of them, so a row in a folder nobody owns is seen.
+ */
+function monitoredDirs(ctx, entries) {
+  const dirs = new Set(ctx.proofs.flatMap((m) => Object.values(m.ledgerDirs ?? {})));
+  for (const e of entries) if (e.kind === "call") dirs.add(e.evidence.ledgerDir);
+  return [...dirs].sort();
+}
+
 async function humanStep(ctx, step, { guard, fail, setRunning }) {
   const { deps, transcript } = ctx;
   const h = typeof step.human === "function" ? step.human(ctx) : step.human;
   validateHuman(h, step.id);
+  const entries = entriesOf(h);
   const tty = deps.ui.tty();
   if (!tty.stdin || !tty.stdout) fail("a terminal on stdin and stdout for a human step", `stdin ${tty.stdin ? "is" : "is not"} a TTY, stdout ${tty.stdout ? "is" : "is not"} a TTY`);
   if (!HOSTS.includes(h.host)) fail(`host ${HOSTS.join(" or ")}`, h.host);
@@ -388,6 +541,8 @@ async function humanStep(ctx, step, { guard, fail, setRunning }) {
   const say = ["", `>>> ${step.id}: do this in ${h.host}:`, ...h.say.map((l) => `    ${l}`), ""];
   for (const l of say) deps.ui.say(l);
   transcript.append(`HUMAN STEP (${h.host}):\n${h.say.map((l) => `  ${l}`).join("\n")}\n`);
+  // The checks this session is judged by are fixed before it starts: a missing one is a fail, never an omission.
+  transcript.append(`[planned ${step.id}: ${entries.map((e) => entryLabel(h, e)).join("; ")}]\n`);
   try {
     await guard(deps.ui.waitEnter(`Press Enter to start ${h.host}`));
   } catch (e) {
@@ -397,15 +552,18 @@ async function humanStep(ctx, step, { guard, fail, setRunning }) {
   deps.ui.close();
   await readHostVersions(ctx, `before ${step.id}`);
   const cursor = h.before ? await h.before(ctx) : undefined;
-  // The window starts here: the ledger's row counts and, when a session reader exists, its cursor.
-  const ledgerBefore = ledgerCursor(ctx.env.HOME, h.evidence.ledgerDir);
+  // The window starts here: every monitored ledger folder's row counts and, when a session reader exists, its cursor.
+  const ledgerBefore = monitoredDirs(ctx, entries).map((dir) => ledgerCursor(ctx.env.HOME, dir));
   const sessionCursor = await deps.sessionReader?.cursor?.({ host: h.host, ctx });
+  // A fresh environment per launch: an off-switch override (and the Pi-only credentials) never reaches a later launch, a helper, the scrubber or the recorder.
+  const launchEnv = { ...ctx.env, ...(h.host === "pi" ? ctx.passEnv : {}), ...(h.env ?? {}) };
+  if (h.env) transcript.append(`[host env: ${Object.entries(h.env).map(([k, v]) => `${k}=${v}`).join(" ")}]\n`);
   const launchedAt = deps.now();
   setRunning(true);
   let exit;
   try {
     // --pass-env variables (a provider key) reach Pi only, never Claude Code or any other command.
-    exit = await deps.launchHost(h.host, { cwd: ctx.cwd, env: h.host === "pi" ? { ...ctx.env, ...ctx.passEnv } : ctx.env });
+    exit = await deps.launchHost(h.host, { cwd: ctx.cwd, env: launchEnv });
   } finally {
     setRunning(false);
     deps.ui.restore?.();
@@ -415,52 +573,99 @@ async function humanStep(ctx, step, { guard, fail, setRunning }) {
   if (exit.error) fail(`${h.host} to start`, `${exit.error} (exit ${exit.code ?? "?"})`);
   await readHostVersions(ctx, `after ${step.id}`);
   ctx.hostRuns.push({ step: step.id, host: h.host, cursor, launchedAt, exitedAt, exit });
-  await judgeHostStep(ctx, step, h, { ledgerBefore, sessionCursor, launchedAt, exitedAt, exit }, { guard, fail });
+  await judgeHostStep(ctx, step, h, entries, { ledgerBefore, sessionCursor, launchedAt, exitedAt, exit }, { guard, fail });
 }
 
 /**
- * The evidence for a host step (e1-evidence.mjs). The host's exit proves nothing: with a recognised session
- * record the evaluator applies the design's rules to it; otherwise the operator is asked the fixed questions
- * and the step is marked `attested` in the transcript. The ledger is a machine check either way, and an
- * attestation never overrides it. A failed evidence check stops the part.
+ * The evidence for a host step (e1-evidence.mjs), one verdict per planned entry. The host's exit proves nothing: a `call`
+ * entry is judged on the host's session record when a reader recognises it, otherwise the operator is asked the fixed
+ * questions and the entry is marked `attested`; a `visual` entry is always attested. The ledger is a machine check
+ * either way and an attestation never overrides it. Every ledger folder of every proof module is read: a folder a `call`
+ * entry owns is judged by that entry, every other must have no new row. The step passes only when every entry does, and a
+ * failure names every failed entry.
  */
-async function judgeHostStep(ctx, step, h, window, { guard, fail }) {
+async function judgeHostStep(ctx, step, h, entries, window, { guard, fail }) {
   const { deps, transcript } = ctx;
-  const evidence = h.evidence;
-  let rows;
-  try { rows = ledgerWindow(ctx.env.HOME, window.ledgerBefore); }
-  catch (e) { transcript.append(`[ledger window ${evidence.ledgerDir}: ${e.message}]\n`); fail(`a readable ledger that only grew during ${step.id}`, e.message); }
-  transcript.append(`[ledger window ${evidence.ledgerDir}: ${rows.length} new row${rows.length === 1 ? "" : "s"}${rows.map((r) => `; ${r.ts} rewrite=${r.rewrite} is_error=${r.is_error}`).join("")}]\n`);
+  const win = { launchedAt: window.launchedAt.getTime(), exitedAt: window.exitedAt.getTime() };
+  const rowsByDir = {};
+  for (const cursor of window.ledgerBefore) {
+    let rows;
+    try { rows = ledgerWindow(ctx.env.HOME, cursor); }
+    catch (e) { transcript.append(`[ledger window ${cursor.dir}: ${e.message}]\n`); fail(`a readable ledger that only grew during ${step.id}`, e.message); }
+    rowsByDir[cursor.dir] = rows;
+    transcript.append(`[ledger window ${cursor.dir}: ${rows.length} new row${rows.length === 1 ? "" : "s"}${rows.map((r) => `; ${r.ts} rewrite=${r.rewrite} is_error=${r.is_error}`).join("")}]\n`);
+  }
+  const owned = new Set(entries.filter((e) => e.kind === "call").map((e) => e.evidence.ledgerDir));
+  const strays = Object.entries(rowsByDir).filter(([dir, rows]) => !owned.has(dir) && rows.length).map(([dir, rows]) => `unexpected ledger rows in ${dir}: ${rows.length} new`);
+
   let model;
-  if (deps.sessionReader) {
+  if (deps.sessionReader && entries.some((e) => e.kind === "call")) {
     try { model = await guard(Promise.resolve(deps.sessionReader.read({ host: h.host, ctx, cursor: window.sessionCursor, launchedAt: window.launchedAt, exitedAt: window.exitedAt }))); }
     catch (e) { if (e instanceof AbortError) throw e; transcript.append(`[session record not read: ${e.message}]\n`); }
     if (model !== undefined && !validModel(model)) { transcript.append("[session record not in a recognised shape]\n"); model = undefined; }
   }
-  let verdict, mode, answers;
-  if (model) {
-    mode = "machine";
-    verdict = evaluate(evidence, model, rows, { launchedAt: window.launchedAt.getTime(), exitedAt: window.exitedAt.getTime() });
-  } else {
-    mode = "attested";
+  const results = entries.map(() => undefined);
+  const attested = [];
+  entries.forEach((e, i) => {
+    if (e.kind === "call" && model) results[i] = { mode: "machine", ...evaluate(e.evidence, model, rowsByDir[e.evidence.ledgerDir], win) };
+    else attested.push(i);
+  });
+  if (attested.length) {
     deps.ui.say(`\n>>> ${step.id}: ${h.host} has exited (${window.exit.code ?? window.exit.signal ?? "?"}). No machine evidence from the host's session record, so say what you saw:`);
-    const log = [];
+    const several = entries.length > 1;
+    const labelOf = (e) => (e.plugin && several ? `${step.id} ${e.plugin}` : step.id);
+    const asked = [];
     try {
       // V1: one Enter in front, so a keystroke typed while the host was closing is taken here and not by a question.
-      await guard(deps.ui.waitEnter("Press Enter to answer four questions about what you saw"));
+      const onlyCall = attested.length === 1 && entries[attested[0]].kind === "call";
+      await guard(deps.ui.waitEnter(onlyCall ? "Press Enter to answer four questions about what you saw" : "Press Enter to answer the questions about what you saw"));
       deps.ui.close();
-      answers = await askQuestions(async (question) => { const a = await guard(deps.ui.ask(`${question} `)); log.push([question, a]); return a; });
+      // All call entries' questions first, then each visual entry's statements; every try is kept for the transcript.
+      for (const kind of ["call", "visual"]) for (const i of attested.filter((k) => entries[k].kind === kind)) {
+        const e = entries[i];
+        if (e.plugin && several) deps.ui.say(`--- ${e.plugin} ---`);
+        const log = [];
+        const ask = async (question) => { const a = await guard(deps.ui.ask(`${question} `)); log.push([question, a]); return a; };
+        let answers, verdict;
+        try {
+          if (kind === "call") answers = await askQuestions(ask);
+          else verdict = await askVisual(ask, e.expect);
+        } finally {
+          asked.push([labelOf(e), log]);
+          for (const [question, a] of log) transcript.append(`ATTESTED ${labelOf(e)} Q: ${question}\nATTESTED ${labelOf(e)} A: ${a}\n`);
+        }
+        results[i] = kind === "call"
+          ? { mode: "attested", answers, ...evaluateAttested(e.evidence, answers, rowsByDir[e.evidence.ledgerDir], win) }
+          : { mode: "attested", ...verdict };
+      }
     } catch (e) {
       deps.ui.close();
       throw e instanceof AbortError ? new AbortError(`aborted at step ${step.id}`) : e;
     }
     deps.ui.close();
-    for (const [question, a] of log) transcript.append(`ATTESTED ${step.id} Q: ${question}\nATTESTED ${step.id} A: ${a}\n`);
-    verdict = evaluateAttested(evidence, answers, rows, { launchedAt: window.launchedAt.getTime(), exitedAt: window.exitedAt.getTime() });
   }
-  transcript.append(`[evidence ${step.id} (${h.host}, ${evidence.kind}): ${mode} ${verdict.result}${verdict.reasons.length ? `: ${verdict.reasons.join("; ")}` : ""}]\n`);
-  ctx.hostResults[step.id] = { host: h.host, kind: evidence.kind, mode, result: verdict.result, reasons: verdict.reasons, answers };
-  if (verdict.result !== "pass") fail(`the evidence for ${step.id}: \`${evidence.command}\`, result ${evidence.result}, ${evidence.ledger.rows} new ledger row(s) (${mode})`, verdict.reasons.join("; "));
+  const failures = [];
+  entries.forEach((e, i) => {
+    const r = results[i] ?? { mode: "attested", result: "fail", reasons: ["no result was recorded for this planned check"] };
+    results[i] = r;
+    transcript.append(`[evidence ${step.id} (${entryLabel(h, e).replace(`${h.host} `, `${h.host}, `)}): ${r.mode} ${r.result}${r.reasons.length ? `: ${r.reasons.join("; ")}` : ""}]\n`);
+    if (r.result !== "pass") failures.push({ e, r });
+  });
+  if (strays.length) transcript.append(`[ledger folders nobody owns in ${step.id}: ${strays.join("; ")}]\n`);
+  const result = failures.length || strays.length ? "fail" : "pass";
+  const first = results.find((r) => r.answers);
+  ctx.hostResults[step.id] = {
+    host: h.host, kind: entries[0].kind === "call" ? entries[0].evidence.kind : "visual", mode: results.every((r) => r.mode === "machine") ? "machine" : "attested",
+    result, reasons: [...results.flatMap((r) => r.reasons), ...strays], answers: first?.answers,
+    entries: entries.map((e, i) => ({ plugin: e.plugin, kind: e.kind, mode: results[i].mode, result: results[i].result, reasons: results[i].reasons })),
+  };
+  if (result === "pass") return;
+  if (entries.length === 1 && !entries[0].plugin && !strays.length) {
+    const ev = entries[0].evidence, r = results[0];
+    fail(`the evidence for ${step.id}: \`${ev.command}\`, result ${ev.result}, ${ev.ledger.rows} new ledger row(s) (${r.mode})`, r.reasons.join("; "));
+  }
+  fail(`every check of ${step.id} to pass (${entries.map((e) => entryLabel(h, e)).join("; ")})`,
+    [...failures.map(({ e, r }) => `${e.plugin ?? "(unnamed)"} ${e.kind}: ${r.reasons.join("; ")}`), ...strays].join(" | "));
 }
 
 // --- the command ---------------------------------------------------------------------------------
@@ -643,11 +848,12 @@ function scrubAttempt(argv, deps) {
   return 0;
 }
 
-/** `2 host steps, 1 attested`, or an empty string when no host step ran. Counts steps that reached a verdict; a step that stopped at the ledger read (V4) has none and is not counted. */
+/** `2 host steps, 1 attested`, or an empty string when no host step ran. A step that holds several checks adds `(N checks)`. Counts steps that reached a verdict; a step that stopped at the ledger read (V4) has none and is not counted. */
 function hostCounts(ctx) {
   const all = Object.values(ctx.hostResults);
   if (!all.length) return "";
-  return `${all.length} host step${all.length === 1 ? "" : "s"}, ${all.filter((r) => r.mode === "attested").length} attested`;
+  const checks = all.reduce((n, r) => n + (r.entries?.length ?? 1), 0);
+  return `${all.length} host step${all.length === 1 ? "" : "s"}${checks === all.length ? "" : ` (${checks} checks)`}, ${all.filter((r) => r.mode === "attested").length} attested`;
 }
 
 /**
