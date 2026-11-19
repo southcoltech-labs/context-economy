@@ -372,7 +372,7 @@ async function bootstrapDownload(system, { version = "8.30.1", patchSha = true, 
   const dir = mkdtempSync(join(tmpdir(), "e1scr-")); const scratch = join(dir, "e1-bootstrap.sh"); writeFileSync(scratch, script);
   const tmp = mkdtempSync(join(tmpdir(), "e1tmp-"));
   const prep = (c) => {
-    for (const t of ["tar", "cut", "mkdir", "cp"]) spawn2("ln", ["-s", spawn2("which", [t], { encoding: "utf8" }).stdout.trim(), join(c.bin, t)]);
+    for (const t of ["tar", "gzip", "cut", "mkdir", "cp"]) spawn2("ln", ["-s", spawn2("which", [t], { encoding: "utf8" }).stdout.trim(), join(c.bin, t)]);
     const sum = spawn2("which", ["sha256sum"], { encoding: "utf8" }).stdout.trim() || spawn2("which", ["shasum"], { encoding: "utf8" }).stdout.trim();
     spawn2("ln", ["-s", sum, join(c.bin, sum.endsWith("shasum") ? "shasum" : "sha256sum")]);
     writeFileSync(join(c.bin, "curl"), `#!/bin/sh\n# curl -fsSL -o FILE URL\ncp "${a.tgz}" "$3"\n`, { mode: 0o755 });
