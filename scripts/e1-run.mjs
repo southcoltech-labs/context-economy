@@ -41,7 +41,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PLATFORMS } from "./check-release-proof.mjs";
 import { allowedEnv, passEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
-import { QUESTIONS, askQuestions, askVisual, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence, validateVisual } from "./e1-evidence.mjs";
+import { QUESTIONS, askQuestions, askVisual, evaluate, evaluateAttested, ledgerCursor, ledgerDirProblem, ledgerWindow, validModel, validateEvidence, validateVisual } from "./e1-evidence.mjs";
 import { isEntry } from "./entry.mjs";
 import { hitsReport, overlaps, scrub } from "./e1-scrub.mjs";
 import { HOSTS, HostVersions, StopError, asText, clip, evidenceFor, parseVersionLine, readHostVersions } from "./e1-core.mjs";
@@ -134,6 +134,7 @@ function entryProblem(m, e, where) {
 function moduleProblem(m, name) {
   if (!m || typeof m !== "object" || m.name !== name || !Array.isArray(m.hosts) || m.hosts.some((h) => !HOSTS.includes(h))) return "another shape";
   if (m.ledgerDirs !== undefined && (!m.ledgerDirs || typeof m.ledgerDirs !== "object" || Array.isArray(m.ledgerDirs) || Object.entries(m.ledgerDirs).some(([h, d]) => !HOSTS.includes(h) || typeof d !== "string"))) return "ledgerDirs is not { host: folder }";
+  for (const [h, d] of Object.entries(m.ledgerDirs ?? {})) { const bad = ledgerDirProblem(d); if (bad) return `ledgerDirs.${h} ${bad}`; }
   if (!Array.isArray(m.behaviour) || !Array.isArray(m.uninstall) || !Array.isArray(m.dataLeft) || m.dataLeft.some((f) => typeof f !== "string")) return "another shape";
   const norm = { ...m, ledgerDirs: m.ledgerDirs ?? {} };
   const lists = { behaviour: m.behaviour, uninstall: m.uninstall };
@@ -358,7 +359,7 @@ export function validateSteps(steps) {
     seen.add(step.id);
     const unknown = Object.keys(step).filter((key) => !STEP_KEYS.includes(key));
     if (unknown.length) throw dataStop(where, `unknown key ${unknown.join(", ")}`);
-    if (typeof step.expand === "function") continue; // replaced by its steps when the part runs (see resolveSteps)
+    if (step.expand !== undefined) throw dataStop(where, "an expand() that is still there after resolution (expansion is one level: an expanded step may not itself expand)");
     if (step.run !== undefined && typeof step.run !== "function") {
       if (!Array.isArray(step.run)) throw dataStop(where, "run is neither a list nor a function");
       for (const c of step.run) {
@@ -391,6 +392,8 @@ export function resolveSteps(ctx, steps) {
   if (!Array.isArray(steps)) return steps;
   return steps.flatMap((s) => {
     if (!s || typeof s !== "object" || typeof s.expand !== "function") return [s];
+    const extra = Object.keys(s).filter((k) => !["id", "title", "expand"].includes(k));
+    if (extra.length) throw dataStop(s.id ?? "(expand)", `a step with expand() also has ${extra.join(", ")} (a placeholder holds nothing else, or its checks would be dropped)`);
     const made = s.expand(ctx);
     if (!Array.isArray(made)) throw dataStop(s.id ?? "(expand)", "expand() did not return a list of steps");
     return made;

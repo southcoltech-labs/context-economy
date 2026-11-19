@@ -1628,3 +1628,36 @@ test("a step with `expand` is replaced by the steps it returns once the proof mo
   assert.equal(await e1a(w2), 1);
   assert.match(w2.err.join("\n"), /expand\(\) did not return a list/);
 });
+
+// --- review 144: unresolved or mixed expansions stop; every declared ledger path is validated -------------------------------
+
+test("review 144 P2-1: a nested expansion stops before any command runs, so its failing check cannot pass unseen", async () => {
+  const w = world();
+  w.parts.e1a = () => [{ id: "outer", expand: () => [{ id: "inner", expand: () => [{ id: "check", run: [["failing-check"]], expect: [] }] }] }];
+  w.onExec = (cmd) => (cmd === "failing-check" ? { code: 1, out: "bad\n" } : { code: 0, out: "" });
+  assert.equal(await e1a(w), 1);
+  assert.match(w.err.join("\n"), /still there after resolution/);
+  assert.ok(!w.execs.some((e) => e.cmd === "failing-check"));
+  assert.deepEqual(w.events.filter((e) => e.startsWith("host:")), []);
+});
+test("review 144 P2-1: a placeholder that also carries run, human or expect fields stops; a non-function expand stops", async () => {
+  for (const step of [{ id: "m", expand: () => [], run: [["never"]] }, { id: "m", expand: () => [], human: { host: "pi" } }, { id: "m", expand: () => [], expect: [] }, { id: "m", expand: "later" }]) {
+    const w = world();
+    w.parts.e1a = () => [step];
+    assert.equal(await e1a(w), 1, JSON.stringify(Object.keys(step)));
+    assert.ok(!w.execs.some((e) => e.cmd === "never"));
+  }
+});
+const visualModule = (dirs) => ({ name: "tool-gateway", hosts: ["claude", "pi"], ledgerDirs: dirs, behaviour: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["a band"] })), uninstall: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["no band"] })), dataLeft: [] });
+async function loadVisual(dirs) {
+  const dir = tmp("e1-vis-");
+  writeFileSync(join(dir, "tool-gateway.mjs"), `export default ${JSON.stringify(visualModule(dirs))};\n`);
+  return loadProofModules(MARKETPLACE, dir);
+}
+test("review 144 P2-2: a visual-only module's retained ledger folder is validated like a call entry's", async () => {
+  const ok = await loadVisual({ claude: ".claude/context-economy/retained", pi: ".claude/context-economy/retained-pi" });
+  assert.equal(ok[0].ledgerDirs.claude, ".claude/context-economy/retained");
+  for (const bad of ["../../outside", "/etc", ".claude/../../x", ".", "./a", ".claude/context-economy/..", "a//b", "", "A/b", ".claude/context-economy/a..b"]) {
+    await assert.rejects(loadVisual({ claude: bad }), (e) => e.name === "StopError" || /StopError/.test(e.constructor.name), `rejects ${JSON.stringify(bad)}`);
+  }
+});

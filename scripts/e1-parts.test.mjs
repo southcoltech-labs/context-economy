@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateSteps } from "./e1-run.mjs";
+import { resolveSteps, validateSteps } from "./e1-run.mjs";
 import { e1aSteps } from "./e1-parts.mjs";
 import toolGateway from "./proof/tool-gateway.mjs";
 
@@ -64,7 +64,9 @@ function replay(step, text, ctx) {
 }
 
 test("the E1a step data passes up-front validation, with unique ids", () => {
-  validateSteps(e1aSteps({ V: "0.1.3", platform: "macos-arm64", staging: STAGING }));
+  const vars = { V: "0.1.3", platform: "macos-arm64", staging: STAGING };
+  validateSteps(resolveSteps({ proofs: [toolGateway] }, e1aSteps(vars)));
+  assert.throws(() => validateSteps(e1aSteps(vars)), /still there after resolution/, "an unresolved placeholder is never accepted");
 });
 
 for (const p of PLATFORMS) {

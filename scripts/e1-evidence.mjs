@@ -227,6 +227,12 @@ export function evaluateAttested(evidence, answers, rows, window) {
   return { result: reasons.length ? "fail" : "pass", reasons };
 }
 
+/** What is wrong with a ledger folder path (relative to the home: no traversal, no absolute path, no dot segment), or undefined. */
+export function ledgerDirProblem(d) {
+  return typeof d === "string" && /^(?:[a-z0-9][a-z0-9.-]*|\.claude)(?:\/[a-z0-9][a-z0-9.-]*)*$/.test(d) && !d.split("/").some((seg) => /^\.+$/.test(seg) || seg.includes(".."))
+    ? undefined : `is not a relative folder path (no traversal, absolute path or dot segment): ${JSON.stringify(d)}`;
+}
+
 /** The step data a human step must carry: what the call is, its required result, and which ledger to check. */
 export function validateEvidence(evidence) {
   if (!isObject(evidence)) return "no evidence (every human step needs it)";
@@ -235,7 +241,7 @@ export function validateEvidence(evidence) {
   if (typeof evidence.kind !== "string" || !evidence.kind) return "evidence.kind is missing";
   if (typeof evidence.command !== "string" || !evidence.command) return "evidence.command is missing";
   if (RESULT_CHOICES[evidence.result] === undefined) return "evidence.result is not 1, 2, 3 or 4";
-  if (typeof evidence.ledgerDir !== "string" || !/^(?:[a-z0-9][a-z0-9.-]*|\.claude)(?:\/[a-z0-9][a-z0-9.-]*)*$/.test(evidence.ledgerDir)) return "evidence.ledgerDir is not a relative folder path";
+  if (ledgerDirProblem(evidence.ledgerDir)) return "evidence.ledgerDir is not a relative folder path";
   const l = evidence.ledger;
   if (!isObject(l) || !Number.isInteger(l.rows) || l.rows < 0) return "evidence.ledger.rows is not a count";
   if (Object.keys(l).some((k) => !["rows", "rewrite", "is_error"].includes(k))) return "unknown evidence.ledger key";
