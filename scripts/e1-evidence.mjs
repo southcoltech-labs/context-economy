@@ -241,3 +241,44 @@ export function validateEvidence(evidence) {
   if (Object.keys(l).some((k) => !["rows", "rewrite", "is_error"].includes(k))) return "unknown evidence.ledger key";
   return undefined;
 }
+
+// --- visual entries (design: "E1 driver: several plugins", section 1) ---------------------------------------------
+//
+// A band drawn above the prompt leaves no session record and no ledger row, so its evidence is always attested:
+// the proof module writes fixed yes/no statements and the operator says whether each was seen.
+
+const VISUAL_KEYS = ["host", "kind", "say", "expect"];
+
+/** The fields of a `visual` entry, as a reason string, or undefined when they are valid. `host` is checked by the caller. */
+export function validateVisual(entry) {
+  if (!isObject(entry)) return "not an object";
+  const unknown = Object.keys(entry).filter((k) => !VISUAL_KEYS.includes(k));
+  if (unknown.length) return `unknown field ${unknown.join(", ")} for a visual entry`;
+  if (!Array.isArray(entry.say) || entry.say.length > 3 || entry.say.some((l) => typeof l !== "string" || l === "" || /[\r\n]/.test(l))) return "`say` is not a list of at most 3 lines";
+  if (!Array.isArray(entry.expect) || entry.expect.length < 1 || entry.expect.length > 4) return "`expect` is not a list of 1 to 4 statements";
+  if (entry.expect.some((s) => typeof s !== "string" || s.trim() === "" || s.length > 100 || s.includes("?") || /[\r\n]/.test(s))) return "an `expect` statement is empty, longer than 100 characters or holds a `?`";
+  return undefined;
+}
+
+const YES_NO = /^(yes|no)$/i;
+
+/**
+ * Asks one statement at a time through `ask(question) -> Promise<string>`: "Did you see: <statement>? (yes/no)", then a
+ * free-text description. A valid `no` fails at once and is never asked again; only an answer that is neither `yes` nor `no`
+ * (or an empty description) is asked again, up to three times. Returns `{ result, reasons }`; the caller keeps every try.
+ */
+export async function askVisual(ask, expect) {
+  for (const statement of expect) {
+    let answer;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      answer = String(await ask(`Did you see: ${statement}? (yes/no)`)).trim();
+      if (YES_NO.test(answer)) break;
+    }
+    if (!YES_NO.test(answer)) return { result: "fail", reasons: [`no valid yes/no answer for "${statement}" after 3 tries (last: ${JSON.stringify(answer)})`] };
+    if (/^no$/i.test(answer)) return { result: "fail", reasons: [`the operator did not see: ${statement}`] };
+  }
+  let description = "";
+  for (let attempt = 1; attempt <= 3 && description === ""; attempt++) description = String(await ask("Describe in a few words what you saw")).trim();
+  if (description === "") return { result: "fail", reasons: ["no description of what the operator saw after 3 tries"] };
+  return { result: "pass", reasons: [] };
+}

@@ -16,15 +16,15 @@
 // error is the other platform's missing run. With one run file per platform that check has nothing to
 // read until `combine`, so the driver stops at the recorder's own "recorded from capture" line.
 //
-// Single-plugin limit: the evidence model is one call per host step, so each host has exactly one
-// behaviour and one uninstall entry across the proof modules; any other count is a stop. A second
-// plugin with its own call needs the design's "one host session per host" worked out first.
+// Several plugins: every plugin in the marketplace is installed, updated and uninstalled in the same run, and each
+// host session (one per host per phase) carries every plugin's instructions and is judged entry by entry
+// (e1-run.mjs). A plugin with an off switch gets its own session per host as well, run with the switch on.
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { StopError, asText, evidenceFor, readHostVersions } from "./e1-core.mjs";
+import { HOSTS, StopError, asText, evidenceFor, readHostVersions } from "./e1-core.mjs";
 import { GITLEAKS_VERSION } from "./e1-scrub.mjs";
 import { cleanB, installedCheck, ledgerCheck, ledgerCounts, listNames, overrideCheck, readLedgers, rtkBlock } from "./e1-helpers.mjs";
 
@@ -49,25 +49,66 @@ const all = (out, checks) => {
 const plugins = (ctx, host) => ctx.proofs.filter((m) => m.hosts.includes(host));
 /** Where the ledger folders live, relative to the home. The step data reads them by name under this folder (review 120 S7). */
 const DATA_FOLDER = ".claude/context-economy";
-/** Names of the ledger folders (under ~/.claude/context-economy/) of every proof module; a stop for a ledger kept anywhere else. */
-const ledgerFolders = (ctx) => [...new Set(ctx.proofs.flatMap((m) => Object.values(m.ledgerDirs).map((d) => {
+const kindOf = (e) => e.kind ?? "call";
+const hasCall = (m) => [...m.behaviour, ...m.uninstall, ...(m.offSwitch?.checks ?? [])].some((e) => kindOf(e) === "call");
+/** Names of the ledger folders (under ~/.claude/context-economy/) of every proof module with a call entry; a stop for a ledger kept anywhere else. */
+const ledgerFolders = (ctx) => [...new Set(ctx.proofs.filter(hasCall).flatMap((m) => Object.values(m.ledgerDirs).map((d) => {
   if (dirname(d) !== DATA_FOLDER) throw new StopError({ step: ctx.step?.id ?? "ledger folders", expected: `${m.name}'s ledger folder directly under ~/${DATA_FOLDER}/ (the step data reads ledgers there)`, got: d });
   return basename(d);
 })))].sort();
 const dataLeft = (ctx) => [...new Set(ctx.proofs.flatMap((m) => m.dataLeft))].sort();
 
-/** The one entry for `host` in a proof list (`behaviour` or `uninstall`), as step evidence; a stop for any other count. */
-function entryFor(ctx, host, list) {
-  const found = ctx.proofs.flatMap((m) => m[list].filter((e) => e.host === host).map((e) => [m, e]));
-  if (found.length !== 1) throw new StopError({ step: ctx.step.id, expected: `exactly one ${list} entry for ${host} across the proof modules`, got: `${found.length}` });
-  return evidenceFor(found[0][0], found[0][1], list === "behaviour" ? "behaviour" : "uninstall");
+/** The plugins shipping to `host`, in marketplace order; a stop when there is none. */
+function pluginNames(ctx, host) {
+  const found = plugins(ctx, host).map((m) => m.name);
+  if (!found.length) throw new StopError({ step: ctx.step?.id ?? "plugins", expected: `at least one plugin shipping to ${host}`, got: "none" });
+  return found;
 }
 
-/** The one plugin shipping to Claude Code (the single-plugin limit above); a stop for any other count. */
-function pluginName(ctx) {
-  const found = plugins(ctx, "claude");
-  if (found.length !== 1) throw new StopError({ step: ctx.step.id, expected: "exactly one plugin shipping to Claude Code (the step data's single-plugin limit)", got: `${found.length}` });
-  return found[0].name;
+/**
+ * Every entry of `list` (`behaviour` or `uninstall`) for `host` across the proof modules, in marketplace order, as
+ * `{ module, entry }`; a stop when there is none.
+ */
+function entriesFor(ctx, host, list) {
+  const found = ctx.proofs.flatMap((m) => m[list].filter((e) => e.host === host).map((entry) => ({ module: m, entry })));
+  if (!found.length) throw new StopError({ step: ctx.step.id, expected: `at least one ${list} entry for ${host} across the proof modules`, got: "none" });
+  return found;
+}
+
+/**
+ * The entries of an off-switch session for `host` and `module`: the module's own off-switch checks, and every other module's
+ * behaviour entries (the other plugins must still work with the switch on), in marketplace order.
+ */
+function offSwitchEntries(ctx, host, module) {
+  return ctx.proofs.filter((m) => m.hosts.includes(host)).flatMap((m) => (m === module
+    ? m.offSwitch.checks.filter((e) => e.host === host).map((entry) => ({ module: m, entry, as: "off-switch" }))
+    : m.behaviour.filter((e) => e.host === host).map((entry) => ({ module: m, entry, as: "behaviour" }))));
+}
+
+/** The evidence of one entry for a step's `human.entries`. */
+const entryOf = ({ module, entry, as }, phase) => (kindOf(entry) === "visual"
+  ? { plugin: module.name, kind: "visual", expect: entry.expect }
+  : { plugin: module.name, kind: "call", evidence: evidenceFor(module, entry, as ?? phase) });
+
+/** What the operator is told to do: each entry's lines, prefixed with the plugin's name when several plugins share the session. */
+function sessionLines(pairs) {
+  const several = new Set(pairs.map((p) => p.module.name)).size > 1;
+  return pairs.flatMap((p) => (kindOf(p.entry) === "visual" ? p.entry.say : [`Type: Run ${p.entry.command}`]).map((l) => (several ? `${p.module.name}: ${l}` : l)));
+}
+/** The commands of the session's call entries, for the lines that ask for approval. */
+const callCommands = (pairs) => pairs.filter((p) => kindOf(p.entry) === "call").map((p) => `\`${p.entry.command}\``).join(" and ");
+
+/** The `human` data of a session: `host`, the instructions and `entries`. `phase` is `behaviour` or `uninstall`. */
+function sessionHuman(ctx, host, pairs, phase, { env } = {}) {
+  const calls = callCommands(pairs);
+  const lines = sessionLines(pairs);
+  const approve = !calls ? [] : phase === "uninstall"
+    ? [`Approve the permission prompt for ${calls}.`, "Expect Git's own `On branch main ...` output, with no RTK path."]
+    : host === "claude" ? [`Approve the permission prompt for the RTK path and ${calls} (it shows the rewrite reached Claude Code).`] : [];
+  const say = host === "claude"
+    ? ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", ...lines, ...approve, "Then quit with /exit."]
+    : [...lines, ...(phase === "uninstall" ? approve.slice(1) : []), "Then quit Pi."];
+  return { host, say, entries: pairs.map((p) => entryOf(p, phase)), ...(env ? { env } : {}) };
 }
 
 const syncRun = (ctx) => ctx.deps.runSync ?? ((cmd, args) => {
@@ -75,22 +116,21 @@ const syncRun = (ctx) => ctx.deps.runSync ?? ((cmd, args) => {
   return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 });
 const installed = (ctx) => installedCheck({
-  home: ctx.env.HOME, plugins: [pluginName(ctx)], marketplace: MARKETPLACE, staging: ctx.vars.staging, run: syncRun(ctx),
+  home: ctx.env.HOME, plugins: pluginNames(ctx, "claude"), marketplace: MARKETPLACE, staging: ctx.vars.staging, run: syncRun(ctx),
 });
 const ledgers = (ctx) => ledgerCheck({ home: ctx.env.HOME, dirs: ledgerFolders(ctx) });
 const rowCounts = (ctx) => ledgerCounts(readLedgers(ctx.env.HOME, ledgerFolders(ctx)));
 /** The recorder runs from this driver's checkout (it is the driver's tooling), in the clone under test (where the proof files go). */
 const recorder = (ctx, command, claude, pi) => ["node", join(HERE, "e1a-record.mjs"), command, "--version", ctx.vars.V, "--sha", ctx.sha, "--platform", ctx.vars.platform, "--pi-repo", ctx.vars.staging, "--claude", claude, "--pi", pi];
-const hostResult = (ctx, id) => (ctx.hostResults[id]?.result === "pass" ? "pass" : "fail");
-
-/** The run sheet's C.4 / C.6 instructions, per host. */
-const claudeSay = (what) => [
-  "Check the footer shows no 'auto mode' (Shift+Tab until it does not).",
-  "Type: Run git status",
-  ...what,
-  "Then quit with /exit.",
-];
-const piSay = ["Type: Run git status", "Then quit Pi."];
+/**
+ * `pass` for a host only when every host step of `phases` (a tag on the step: `behaviour`, `off-switch` or `uninstall`)
+ * in the assembled step list has a recorded `pass`. A planned step that is missing, aborted or failed gives `fail`;
+ * the answer does not depend on one fixed step id.
+ */
+const hostResult = (ctx, host, phases) => {
+  const ids = (ctx.steps ?? []).filter((s) => s.tag?.host === host && phases.includes(s.tag.phase)).map((s) => s.id);
+  return ids.length && ids.every((id) => ctx.hostResults[id]?.result === "pass") ? "pass" : "fail";
+};
 const ledgersHaveRows = (out, ctx) => all(out, [...ledgerFolders(ctx).map((d) => [new RegExp(`^${esc(d)}: [1-9]\\d* rows$`, "m"), `${d}: at least 1 row`]), [/ledger check: OK/, "ledger check: OK"]]);
 
 
@@ -99,12 +139,15 @@ const ledgersHaveRows = (out, ctx) => all(out, [...ledgerFolders(ctx).map((d) =>
 /**
  * A step's commands and the assertions on them, together, so the `cmd` indices cannot drift from the
  * list. Each item: `{ argv: [..] | (ctx) => [..] }` or `{ label, fn }`, and `expects` (the `expect`
- * entries without `cmd`). The commands are a function of `ctx`, because they name the plugin.
+ * entries without `cmd`), or `{ each: (ctx) => [item, ...] }` for a group with one item per plugin. The commands
+ * are a function of `ctx`, because they name the plugins; with an `each`, so is `expect`.
  */
 function seq(items) {
+  const flat = (ctx) => items.flatMap((it) => (it.each ? it.each(ctx) : [it]));
+  const expectOf = (list) => list.flatMap((it, cmd) => (it.expects ?? []).map((e) => ({ cmd, ...e })));
   return {
-    run: (ctx) => items.map((it) => (it.fn ? { label: it.label, fn: it.fn } : typeof it.argv === "function" ? it.argv(ctx) : it.argv)),
-    expect: items.flatMap((it, cmd) => (it.expects ?? []).map((e) => ({ cmd, ...e }))),
+    run: (ctx) => flat(ctx).map((it) => (it.fn ? { label: it.label, fn: it.fn } : typeof it.argv === "function" ? it.argv(ctx) : it.argv)),
+    expect: items.some((it) => it.each) ? (ctx) => expectOf(flat(ctx)) : expectOf(items),
   };
 }
 
@@ -135,22 +178,22 @@ function rtkStep(id, title = "Install RTK and write config.json") {
   ]) };
 }
 
-/** `installed check` with both commits equal to `sha(ctx)`. */
+/** `installed check` with every plugin's commit and Pi's equal to `sha(ctx)`. */
 const installedAt = (sha) => ({ label: "installed check (installed_plugins.json and the Pi clone)", fn: installed,
-  expects: [{ describe: "both installed commits equal the expected one, then `installed check: OK`",
-    match: found((ctx) => [[new RegExp(`^claude ${esc(pluginName(ctx))}: ${sha(ctx)}$`, "m"), `${pluginName(ctx)} at ${sha(ctx)}`], [new RegExp(`^pi: ${sha(ctx)}$`, "m"), `pi at ${sha(ctx)}`], [/installed check: OK/, "installed check: OK"]]) }] });
+  expects: [{ describe: "every installed commit equals the expected one, then `installed check: OK`",
+    match: found((ctx) => [...pluginNames(ctx, "claude").map((n) => [new RegExp(`^claude ${esc(n)}: ${sha(ctx)}$`, "m"), `${n} at ${sha(ctx)}`]), [new RegExp(`^pi: ${sha(ctx)}$`, "m"), `pi at ${sha(ctx)}`], [/installed check: OK/, "installed check: OK"]]) }] });
 
 const installedNone = { label: "installed check", fn: installed,
-  expects: [{ describe: "both hosts `not installed`, then `installed check: OK`",
-    match: found((ctx) => [[new RegExp(`^claude ${esc(pluginName(ctx))}: not installed$`, "m"), `${pluginName(ctx)} not installed`], [/^pi: not installed$/m, "pi not installed"], [/installed check: OK/, "installed check: OK"]]) }] };
+  expects: [{ describe: "every plugin and Pi `not installed`, then `installed check: OK`",
+    match: found((ctx) => [...pluginNames(ctx, "claude").map((n) => [new RegExp(`^claude ${esc(n)}: not installed$`, "m"), `${n} not installed`]), [/^pi: not installed$/m, "pi not installed"], [/installed check: OK/, "installed check: OK"]]) }] };
 
 /** Install from `ref` (a tag, `release` or `promoted-v…`): marketplace add, plugin install, Pi install, installed check. */
 function installStep(id, title, { ref, sha, removeFirst = false }) {
   return { id, title, ...seq([
     ...(removeFirst ? [{ argv: ["claude", "plugin", "marketplace", "remove", MARKETPLACE] }] : []),
     { argv: (ctx) => ["claude", "plugin", "marketplace", "add", `${ctx.vars.staging}#${ref(ctx)}`], expects: [{ match: /Successfully added marketplace/ }] },
-    { argv: (ctx) => ["claude", "plugin", "install", `${pluginName(ctx)}@${MARKETPLACE}`],
-      expects: [{ describe: "a successful plugin install", match: found((ctx) => [[new RegExp(`Successfully installed plugin: ${esc(pluginName(ctx))}@${MARKETPLACE}`), `${pluginName(ctx)} installed`]]) }] },
+    { each: (ctx) => pluginNames(ctx, "claude").map((name) => ({ argv: ["claude", "plugin", "install", `${name}@${MARKETPLACE}`],
+      expects: [{ describe: `a successful install of ${name}`, match: found(() => [[new RegExp(`Successfully installed plugin: ${esc(name)}@${MARKETPLACE}`), `${name} installed`]]) }] })) },
     { argv: (ctx) => ["pi", "install", `git:github.com/${ctx.vars.staging}@${ref(ctx)}`],
       expects: [{ describe: "Pi's install line", match: found((ctx) => [[new RegExp(`Installed git:github\\.com/${esc(ctx.vars.staging)}@${esc(ref(ctx))}`), "Pi's install line"]]) }] },
     installedAt(sha),
@@ -162,23 +205,37 @@ function updateStep(id, title, { sha, notMention }) {
   const quiet = notMention ? [{ describe: "no output naming the other version", match: (out, ctx) => !new RegExp(`\\b${esc(notMention(ctx))}\\b`).test(out) }] : [];
   return { id, title, ...seq([
     { argv: ["claude", "plugin", "marketplace", "update", MARKETPLACE], expects: quiet },
-    { argv: (ctx) => ["claude", "plugin", "update", `${pluginName(ctx)}@${MARKETPLACE}`], expects: quiet },
+    { each: (ctx) => pluginNames(ctx, "claude").map((name) => ({ argv: ["claude", "plugin", "update", `${name}@${MARKETPLACE}`], expects: quiet })) },
     { argv: ["pi", "update", "--extensions"], expects: quiet },
     installedAt(sha),
   ]) };
 }
 
-/** One `git status` in each host, and the ledger check: the run sheet's A.5, C.4 and "still rewriting". */
+/** One session per host with every plugin's behaviour (a call, a visual), and the ledger check: the run sheet's A.5, C.4 and "still rewriting". */
 function behaviourSteps(prefix, title) {
   return [
-    { id: `${prefix}a`, title: `Claude Code: ${title}`,
-      human: (ctx) => ({ host: "claude", evidence: entryFor(ctx, "claude", "behaviour"),
-        say: claudeSay(["Approve the permission prompt for the RTK path and `git status` (it shows the rewrite reached Claude Code)."]) }) },
-    { id: `${prefix}b`, title: `Pi: ${title}`, human: (ctx) => ({ host: "pi", evidence: entryFor(ctx, "pi", "behaviour"), say: piSay }) },
+    { id: `${prefix}a`, title: `Claude Code: ${title}`, tag: { phase: "behaviour", host: "claude" },
+      human: (ctx) => sessionHuman(ctx, "claude", entriesFor(ctx, "claude", "behaviour"), "behaviour") },
+    { id: `${prefix}b`, title: `Pi: ${title}`, tag: { phase: "behaviour", host: "pi" },
+      human: (ctx) => sessionHuman(ctx, "pi", entriesFor(ctx, "pi", "behaviour"), "behaviour") },
     { id: `${prefix}c`, title: "Ledgers after the behaviour test", ...seq([
       { label: "node ~/ledger.mjs", fn: ledgers, expects: [{ describe: "every ledger with a row, then `ledger check: OK`", match: ledgersHaveRows }] },
     ]) },
   ];
+}
+
+/**
+ * For each plugin with an off switch, one session per host with the switch on (E1a only): the plugin's own checks, and the
+ * other plugins' behaviour (they must still work). The result counts toward the host's `behavior=` in the capture.
+ */
+function offSwitchSteps(prefix) {
+  return { id: `${prefix}s`, title: "Off-switch sessions", expand: (ctx) => ctx.proofs.filter((m) => m.offSwitch).flatMap((m) => HOSTS
+    .filter((h) => m.hosts.includes(h))
+    .map((host) => ({
+      id: `${prefix}s.${m.name}.${host}`, title: `${host === "claude" ? "Claude Code" : "Pi"}: ${m.name} off (${Object.entries(m.offSwitch.env).map(([k, v]) => `${k}=${v}`).join(" ")})`,
+      tag: { phase: "off-switch", host },
+      human: (c) => sessionHuman(c, host, offSwitchEntries(c, host, m), "behaviour", { env: m.offSwitch.env }),
+    }))) };
 }
 
 /** E1b "still rewriting": the override check, then one new rewritten `git status` per host with its ledger row. */
@@ -195,17 +252,17 @@ function stillRewriting(prefix) {
 function uninstallSteps(prefix) {
   return [
     { id: `${prefix}a`, title: "Uninstall and check", ...seq([
-      { argv: (ctx) => ["claude", "plugin", "uninstall", `${pluginName(ctx)}@${MARKETPLACE}`],
-        expects: [{ describe: "a successful plugin uninstall", match: found((ctx) => [[new RegExp(`Successfully uninstalled plugin: ${esc(pluginName(ctx))}`), `${pluginName(ctx)} uninstalled`]]) }] },
+      { each: (ctx) => pluginNames(ctx, "claude").map((name) => ({ argv: ["claude", "plugin", "uninstall", `${name}@${MARKETPLACE}`],
+        expects: [{ describe: `a successful uninstall of ${name}`, match: found(() => [[new RegExp(`Successfully uninstalled plugin: ${esc(name)}`), `${name} uninstalled`]]) }] })) },
       { argv: (ctx) => ["pi", "remove", `git:github.com/${ctx.vars.staging}`],
         expects: [{ describe: "Pi's remove line", match: found((ctx) => [[new RegExp(`Removed git:github\\.com/${esc(ctx.vars.staging)}`), "Pi's remove line"]]) }] },
       installedNone,
       { label: "node ~/ledger.mjs", fn: ledgers, expects: [{ describe: "every ledger with rows, then `ledger check: OK`", match: ledgersHaveRows }] },
     ]), set: (ctx) => { ctx.results.rowsBeforeUninstallRuns = rowCounts(ctx); } },
-    { id: `${prefix}b`, title: "Claude Code after uninstall: plain git status",
-      human: (ctx) => ({ host: "claude", evidence: entryFor(ctx, "claude", "uninstall"), say: claudeSay(["Approve the permission prompt for `git status`.", "Expect Git's own `On branch main ...` output, with no RTK path."]) }) },
-    { id: `${prefix}c`, title: "Pi after uninstall: plain git status",
-      human: (ctx) => ({ host: "pi", evidence: entryFor(ctx, "pi", "uninstall"), say: ["Type: Run git status", "Expect Git's own `On branch main ...` output, with no RTK path.", "Then quit Pi."] }) },
+    { id: `${prefix}b`, title: "Claude Code after uninstall: plain git status", tag: { phase: "uninstall", host: "claude" },
+      human: (ctx) => sessionHuman(ctx, "claude", entriesFor(ctx, "claude", "uninstall"), "uninstall") },
+    { id: `${prefix}c`, title: "Pi after uninstall: plain git status", tag: { phase: "uninstall", host: "pi" },
+      human: (ctx) => sessionHuman(ctx, "pi", entriesFor(ctx, "pi", "uninstall"), "uninstall") },
     { id: `${prefix}d`, title: "Ledgers unchanged, data left", ...seq([
       { label: "node ~/ledger.mjs", fn: ledgers, expects: [{ match: /ledger check: OK/ }] },
       { label: "ls ~/.claude/context-economy", fn: (ctx) => listNames(join(ctx.env.HOME, ".claude", "context-economy")),
@@ -252,16 +309,17 @@ export function e1aSteps(vars) {
     rtkStep("E1a.2"),
     installStep("E1a.3", "Install the candidate", { ref: () => `v${V}`, sha: (ctx) => ctx.sha }),
     ...behaviourSteps("E1a.4", "one rewritten Bash call"),
+    offSwitchSteps("E1a.4"),
 
     { id: "E1a.5", title: "Capture", ...seq([
-      { argv: (ctx) => recorder(ctx, "capture", `install=pass,behavior=${hostResult(ctx, "E1a.4a")}`, `install=pass,behavior=${hostResult(ctx, "E1a.4b")}`), expects: [{ match: /captured [0-9a-f-]{36} \(pass so far\)/ }] },
+      { argv: (ctx) => recorder(ctx, "capture", `install=pass,behavior=${hostResult(ctx, "claude", ["behaviour", "off-switch"])}`, `install=pass,behavior=${hostResult(ctx, "pi", ["behaviour", "off-switch"])}`), expects: [{ match: /captured [0-9a-f-]{36} \(pass so far\)/ }] },
       { argv: ["ls", "docs/release-proof/"], expects: [{ describe: "the capture file listed", match: (out) => all(out, [[new RegExp(`(?:^|\\s)${esc(V)}-${esc(platform)}\\.capture\\.json(?=\\s|$)`, "m"), "the capture file"]]) }] },
     ]) },
 
     ...uninstallSteps("E1a.6"),
 
     { id: "E1a.7", title: "Finalize", ...seq([
-      { argv: (ctx) => recorder(ctx, "finalize", `uninstall=${hostResult(ctx, "E1a.6b")}`, `uninstall=${hostResult(ctx, "E1a.6c")}`), expects: [{ match: /recorded from capture [0-9a-f-]{36} \(Claude pass, Pi pass\)/ }] },
+      { argv: (ctx) => recorder(ctx, "finalize", `uninstall=${hostResult(ctx, "claude", ["uninstall"])}`, `uninstall=${hostResult(ctx, "pi", ["uninstall"])}`), expects: [{ match: /recorded from capture [0-9a-f-]{36} \(Claude pass, Pi pass\)/ }] },
       { label: "copy the run file into the attempt folder; print its SHA-256 and capture id", fn: (c) => {
         const file = join(c.cwd, "docs", "release-proof", `${V}-${platform}.json`);
         if (!existsSync(file)) return { code: 1, out: `${file} was not written` };
@@ -349,11 +407,29 @@ const dataCheck = (id, title = "Data check") => ({ id, title, ...seq([
 
 const fetchTags = { argv: ["git", "fetch", "--tags", "origin"] };
 
+/**
+ * The compatibility preflight (review 142). The proof modules are the clone's current ones, so a drill whose version predates
+ * a plugin would ask for checks of a plugin that version does not have. Each part first compares the plugins listed in
+ * `.claude-plugin/marketplace.json` at the tags it will use with the loaded proof modules; any difference stops the part
+ * before any install, update, uninstall, host launch or drill-state change. `refs(ctx)` names the tags: the baseline reads
+ * A's only (B's tag does not exist yet), the later parts read A's and B's.
+ */
+const sameAsModules = (ref) => ({ argv: ["git", "show", `${ref}:.claude-plugin/marketplace.json`], expects: [{
+  describe: `the plugins listed at ${ref} to be the ones the proof modules cover`,
+  match: (out, ctx) => {
+    let names;
+    try { names = (JSON.parse(out).plugins ?? []).map((p) => p?.name); } catch { return { ok: false, got: `${ref}:.claude-plugin/marketplace.json does not parse` }; }
+    const have = [...ctx.proofs.map((m) => m.name)].sort(), listed = [...names].sort();
+    return JSON.stringify(have) === JSON.stringify(listed) ? { ok: true } : { ok: false, got: `${ref} lists [${listed.join(", ")}] but the proof modules cover [${have.join(", ")}] (this drill is not compatible with the current marketplace; use a drill whose versions list the same plugins, or run it by hand)` };
+  } }] });
+const preflightStep = (refs) => ({ id: "PF", title: "Compatibility preflight: the plugins at each tag match the proof modules", ...seq([fetchTags, { each: (ctx) => refs(ctx).map(sameAsModules) }]) });
+
 export function baselineSteps(vars) {
   needVersions(vars, "a");
   const { a, b } = vars;
   if (b !== undefined) needVersions(vars, "b");
   return [
+    preflightStep(() => [`v${a}`]),
     { id: "A.0", title: "Clean check (b) (run sheet Part 0.4)", ...seq([{ label: "node ~/clean-b.mjs", fn: (ctx) => cleanB({ home: ctx.env.HOME }), expects: [{ match: /clean check \(b\): OK/ }] }]) },
     { id: "A.1", title: `Update the clone and check the promotion of ${a} (run sheet A.1)`, ...seq([
       fetchTags, { argv: ["git", "checkout", "-q", "main"] }, { argv: ["git", "pull", "-q", "--ff-only"] },
@@ -382,14 +458,15 @@ export function undeliveredSteps(vars) {
   needVersions(vars, "a", "b");
   const { a, b } = vars;
   const versionAt = (ref, file, want) => ({ argv: ["git", "show", `${ref}:${file}`], expects: [{ describe: `\`"version": "${want}"\` in ${ref}:${file}`, match: (out) => (firstVersion(out) === want ? { ok: true } : { ok: false, got: `version ${firstVersion(out) ?? "(none)"}` }) }] });
-  const plugin = (ctx) => `plugins/${pluginName(ctx)}/.claude-plugin/plugin.json`;
+  const manifests = (ref, want) => ({ each: (ctx) => pluginNames(ctx, "claude").map((n) => versionAt(ref, `plugins/${n}/.claude-plugin/plugin.json`, want)) });
   return [
+    preflightStep(() => [`v${a}`, `v${b}`]),
     { id: "B.1", title: `Read the two versions (${b} on main, ${a} on release)`, ...seq([
       fetchTags,
       { argv: ["git", "rev-parse", `v${b}^{commit}`, "origin/main", "origin/release"],
         expects: [{ describe: `the tag's commit twice (v${b}, origin/main), then A's commit (origin/release)`, match: (out, ctx) => equalLines((c) => { const sha = commitLines(out)[0]; return [sha, sha, shaA(c)]; })(out, ctx) }] },
-      versionAt("origin/main", "package.json", b), { argv: (ctx) => ["git", "show", `origin/main:${plugin(ctx)}`], expects: versionAt("", "", b).expects },
-      versionAt("origin/release", "package.json", a), { argv: (ctx) => ["git", "show", `origin/release:${plugin(ctx)}`], expects: versionAt("", "", a).expects },
+      versionAt("origin/main", "package.json", b), manifests("origin/main", b),
+      versionAt("origin/release", "package.json", a), manifests("origin/release", a),
     ]), after: [sameRecordedB(b, 1)], set: (ctx, results) => writeState(ctx, { b, shaB: commitLines(results[1].out)[0] }) },
     // README section 3's "restart the host" (start and quit without typing) is not a step here: there is no call to give evidence for.
     updateStep("B.2", `Update: ${b} is not delivered`, { sha: shaA, notMention: () => b }),
@@ -400,6 +477,7 @@ export function promotedSteps(vars) {
   needVersions(vars, "b");
   const { b } = vars;
   return [
+    preflightStep((ctx) => [`v${vars.a ?? recorded(ctx, "a")}`, `v${b}`]),
     { id: "E.6", title: `Record the promotion of ${b}`, ...seq([
       fetchTags,
       { argv: ["git", "rev-parse", `promoted-v${b}^{commit}`, "origin/release", `v${b}^{commit}`],
@@ -412,6 +490,7 @@ export function cycleSteps(vars) {
   needVersions(vars, "a", "b");
   const { a, b } = vars;
   return [
+    preflightStep(() => [`v${a}`, `v${b}`]),
     { id: "F.1", title: "Versions and the promotion", ...seq([
       fetchTags, { argv: ["git", "pull", "-q", "--ff-only"] },
       { argv: ["git", "rev-parse", `promoted-v${b}^{commit}`, "origin/release", `promoted-v${a}^{commit}`], expects: [{ describe: "B, B, then A", match: equalLines((ctx) => [shaB(ctx), shaB(ctx), shaA(ctx)]) }] },
