@@ -2,6 +2,7 @@
 
 // Engine tests: fake hosts, a temp HOME for everything, nothing real touched. The scrubber at the end
 // of each run is the real gitleaks (see e1-scrub.test.mjs).
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { chmodSync, copyFileSync, cpSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -1074,7 +1075,7 @@ test("E14: the run saves a scrub context; `scrub --attempt` rebuilds a missing c
   const ctxFile = join(dir, "scrub-context.json");
   assert.equal(mode(ctxFile), 0o600);
   const saved = JSON.parse(readFileSync(ctxFile, "utf8"));
-  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "config", "home", "hostname", "label", "name", "passEnvNames", "realHome"]);
+  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "config", "home", "hostname", "label", "name", "passEnvNames", "passEnvVerifiers", "realHome"]);
   assert.equal(saved.assertSpans.length, 1);
   // refuses to overwrite
   assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
@@ -1141,6 +1142,57 @@ test("--pass-env: a saved name the driver does not pass is refused at rebuild", 
   assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
   assert.match(w.err.join("\n"), /not a provider key/);
   assert.equal(existsSync(clean), false);
+});
+
+test("--pass-env: a rotated or wrong value is refused, no copy; the original works", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  w.deps.env.DEEPSEEK_API_KEY = "a-different-key-0000";
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+  assert.match(w.err.join("\n"), /not the one the run used.*No scrubbed copy written/s);
+  assert.equal(existsSync(clean), false);
+  w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 0);
+  assert.ok(!readFileSync(clean, "utf8").includes(REFLECT));
+});
+
+test("--pass-env: the saved verifier is salted, not the value; a missing or malformed verifier refuses the rebuild", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  const f = join(dir, "scrub-context.json");
+  const orig = JSON.parse(readFileSync(f, "utf8"));
+  const v = orig.passEnvVerifiers.DEEPSEEK_API_KEY;
+  assert.match(v.salt, /^[0-9a-f]{32}$/); assert.match(v.sha256, /^[0-9a-f]{64}$/);
+  assert.notEqual(v.sha256, createHash("sha256").update(REFLECT).digest("hex"), "salted");
+  for (const bad of [undefined, {}, { DEEPSEEK_API_KEY: { salt: "x", sha256: "y" } }, []]) {
+    const c = { ...orig }; if (bad === undefined) delete c.passEnvVerifiers; else c.passEnvVerifiers = bad;
+    writeFileSync(f, JSON.stringify(c));
+    w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+    assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+    assert.match(w.err.join("\n"), /lacks a valid verifier/);
+    assert.equal(existsSync(clean), false);
+  }
+});
+
+test("--pass-env: a legacy attempt whose raw header records --pass-env is refused; an ordinary legacy attempt still rebuilds", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  const f = join(dir, "scrub-context.json");
+  const c = JSON.parse(readFileSync(f, "utf8")); delete c.passEnvNames; delete c.passEnvVerifiers; writeFileSync(f, JSON.stringify(c));
+  assert.match(readFileSync(join(dir, "0.1.3-macos-arm64.raw.txt"), "utf8"), /^# e1-run .*--pass-env/m);
+  w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+  assert.match(w.err.join("\n"), /older driver/);
+  assert.equal(existsSync(clean), false);
+  // ordinary legacy attempt: no --pass-env in the header
+  const w2 = world();
+  w2.onExec = () => ({ code: 0, out: "hello\n" });
+  w2.parts.e1a = () => [{ id: "A", run: [["x"]], expect: [] }];
+  assert.equal(await e1a(w2), 0);
+  const d2 = attempt(w2); const f2 = join(d2, "scrub-context.json");
+  const c2 = JSON.parse(readFileSync(f2, "utf8")); delete c2.passEnvNames; delete c2.passEnvVerifiers; writeFileSync(f2, JSON.stringify(c2));
+  rmSync(join(d2, "0.1.3-macos-arm64.txt"));
+  assert.equal(await w2.run(["scrub", "--attempt", d2]), 0);
 });
 
 test("--pass-env: the re-supplied key is not inherited by the rebuild's scrubber (real subprocess)", async () => {

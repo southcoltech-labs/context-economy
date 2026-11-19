@@ -32,6 +32,7 @@
 // run, files 0600: the raw transcript, written as the run goes, and the scrubbed copy, made at the end
 // from the complete raw file, only when gitleaks ran correctly (see e1-scrub.mjs).
 import { spawn as nodeSpawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, realpathSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -588,6 +589,11 @@ export async function main(argv, deps = defaultDeps()) {
   return code;
 }
 
+/** A salted SHA-256 of a credential value: lets a rebuild confirm it was given the ORIGINAL value without saving it. */
+function verifier(value, salt = randomBytes(16).toString("hex")) {
+  return { salt, sha256: createHash("sha256").update(`${salt}\0${value}`).digest("hex") };
+}
+
 /**
  * `scrub --attempt <dir>` (E14): rebuilds the scrubbed copy of a finished attempt from its raw file,
  * the saved assertion spans and the saved context. It never overwrites an existing scrubbed copy.
@@ -614,8 +620,14 @@ function scrubAttempt(argv, deps) {
   // redaction needs the values again. Without them the shareable copy cannot be made safely: fail closed.
   if (c.passEnvNames !== undefined && (!Array.isArray(c.passEnvNames) || !c.passEnvNames.every((n) => typeof n === "string"))) { log.error("e1-run: scrub-context.json holds a bad passEnvNames"); return 2; }
   const need = c.passEnvNames ?? [];
+  // A legacy context (no names) is "no credentials" only when the raw header does not record --pass-env.
+  if (c.passEnvNames === undefined && /^# e1-run .*--pass-env/m.test(readFileSync(rawFile, "utf8").slice(0, 4096))) { log.error("e1-run: this attempt was run with --pass-env, but its scrub-context.json has no credential metadata (an older driver), so a scrubbed copy cannot be rebuilt safely. No scrubbed copy written."); return 2; }
   const again = passEnv(need.flatMap((n) => ["--pass-env", n]), deps.env);
   if (again.error) { log.error(`e1-run: the run that made this attempt held ${need.join(", ")} (--pass-env), and the scrubbed copy must remove its value. ${again.error.replace(/^--pass-env /, "")}. No scrubbed copy written.`); return 2; }
+  const ver = c.passEnvVerifiers;
+  if (need.length && (!ver || typeof ver !== "object" || Array.isArray(ver) || !need.every((n) => ver[n] && /^[0-9a-f]{32}$/.test(ver[n].salt) && /^[0-9a-f]{64}$/.test(ver[n].sha256)))) { log.error("e1-run: scrub-context.json lacks a valid verifier for each credential, so the original values cannot be confirmed. No scrubbed copy written."); return 2; }
+  const wrong = need.filter((n) => verifier(again.values[n], ver[n].salt).sha256 !== ver[n].sha256);
+  if (wrong.length) { log.error(`e1-run: the value now in ${wrong.join(", ")} is not the one the run used (rotated or mistyped), so it cannot be removed from the transcript. Export the original value. No scrubbed copy written.`); return 2; }
   for (const n of need) delete deps.env[n]; // as in a run: the scrubber's children never inherit it
   const r = scrubToFile(deps, { raw: readFileSync(rawFile, "utf8"), outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt, secrets: again.values });
   if (!r.ok) { log.error(`e1-run: NO scrubbed copy written: ${r.reason}. The raw transcript stays private in ${attempt}.`); return 3; }
@@ -650,7 +662,7 @@ function scrubFile(ctx, rawFile, outFile) {
   const label = ctx.vars.platform?.startsWith("linux") ? "linux" : "mac";
   // E14: what a later `scrub --attempt` needs, saved before the scrub so a failed second pass can be redone.
   const contextFile = join(ctx.attemptDir, "scrub-context.json");
-  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans, passEnvNames: Object.keys(ctx.passEnv ?? {}) }, null, 1), { mode: 0o600 });
+  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans, passEnvNames: Object.keys(ctx.passEnv ?? {}), passEnvVerifiers: Object.fromEntries(Object.entries(ctx.passEnv ?? {}).map(([n, v]) => [n, verifier(v)])) }, null, 1), { mode: 0o600 });
   return scrubToFile(ctx.deps, { raw, rawFile, outFile, config, spans: ctx.assertSpans, label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, tmpDir: ctx.attemptDir, secrets: ctx.passEnv });
 }
 
