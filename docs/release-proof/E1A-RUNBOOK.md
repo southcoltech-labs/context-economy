@@ -37,21 +37,28 @@ Record each command and its output in the transcript. Do not uninstall yet: step
 | Claude Code | A Bash call such as `git status` | It runs as `'<rtk path>' git status`; a ledger row in `~/.claude/context-economy/gateway-ledger/` has `"rewrite":"applied"`. A permission prompt after the rewrite is recorded, not failed |
 | Pi | A `bash` tool call | Rewritten to the quoted RTK path; a row in `gateway-ledger-pi/` with `"rewrite":"applied"` |
 
-### With more than one plugin (§5a)
+### With more than one plugin (§5a): the whole-run manual fallback
 
-Applies only when the marketplace at `v$V` lists more than one plugin; with tool-gateway alone, the table above is the whole step.
+Applies only when the marketplace at `v$V` lists more than one plugin; with tool-gateway alone, the table above is the whole step. It is the fallback for the driver pilot: if the driver stops for a driver fault, the **whole** E1a is run by hand from this runbook, for every plugin. Never run one plugin by hand and another through the driver (no hybrid run).
 
-`install`, `behavior` and `uninstall` are recorded **per host**, not per plugin. A host's result is therefore an aggregate: `pass` only after **every** plugin's check for that host passes. Give each check its own transcript row, naming the plugin. Run the whole E1a by hand, for every plugin: never one plugin by hand and another through the driver (no hybrid run).
+`install`, `behavior` and `uninstall` are recorded **per host**, not per plugin. Each is an aggregate: `pass` only after **every** plugin's checks for that host and that attestation pass. Give each check its own transcript row, naming the plugin.
 
-| Step | Claude Code | Pi |
+| Attestation | Passed only after | When |
 | --- | --- | --- |
-| Install | Install every listed plugin as `<plugin>@context-economy`. The recorder checks each installed SHA | `pi install` of the package. Every extension loads from the one clone; the recorder checks its SHA and extensions |
-| Behaviour, one row per plugin | The plugin's own check, from its SPEC or test plan (tool-gateway: the row above) | The same, on Pi |
-| Off switch (a plugin that has one) | Start the host with that plugin's switch set (for example `CE_<NAME>=off`): the plugin does nothing, and every **other** plugin's behaviour row still passes | The same |
-| Uninstall | Remove every plugin and restart. No plugin's feature appears, and no new ledger row | `pi remove` the package and restart. No extension's feature appears |
-| Data left | Exactly the README list. A plugin that keeps no data adds nothing, which does **not** mean the shared folder is empty | The same |
+| `install` | Every listed plugin is installed and confirmed (step 2) | Before capture |
+| `behavior` | Every plugin's behaviour check (this step), **and** every required off-switch check below | Before capture, while the plugins are still installed |
+| `uninstall` | Every plugin is removed and the post-uninstall checks of step 5 pass, including data left | After capture, passed to finalize |
 
-Do not record `behavior=pass` for a host until every row above, including each off-switch row, has passed.
+Steps 3 and 5 hold these checks:
+
+| Check | Claude Code | Pi | Step |
+| --- | --- | --- | --- |
+| Behaviour, one row per plugin | The plugin's own check, from its SPEC or test plan (tool-gateway: the row above) | The same, on Pi | 3 |
+| Off switch (a plugin that has one) | Start the host with that plugin's switch set (for example `CE_<NAME>=off`): the plugin does nothing, and every **other** plugin's behaviour row still passes | The same | 3 |
+| Uninstall | Remove every plugin and restart. No plugin's feature appears, and no new ledger row | `pi remove` the package and restart. No extension's feature appears | 5 |
+| Data left | Exactly the README list. A plugin that keeps no data adds nothing, which does **not** mean the shared folder is empty | The same | 5 |
+
+Off-switch overrides are **command-scoped**: set the variable on that one launch only, for example `CE_<NAME>=off claude` and `CE_<NAME>=off pi`, never with `export`, and not in any settings or config file. Then check that no off switch is left in effect before the next launch: `env | grep '^CE_'` prints nothing in the shell, and no host settings file sets one. The post-uninstall launches of step 5 must run with every off switch absent, in the same shell set-up as the behaviour checks, or a missing feature proves the switch, not the removal. A persistent off switch never counts as uninstall evidence.
 
 ## 4. Capture (before uninstall)
 
@@ -73,7 +80,7 @@ claude plugin uninstall tool-gateway@context-economy   # one line per installed 
 pi remove "git:github.com/$STAGING"
 ```
 
-Start each host again. No rewrite happens, and no new ledger rows appear. The data folders left are exactly the ones the README lists.
+Start each host again, with no off switch set (see §5a: `env | grep '^CE_'` prints nothing). No rewrite happens, and no new ledger rows appear. The data folders left are exactly the ones the README lists.
 
 ## 6. Finalize (after uninstall)
 

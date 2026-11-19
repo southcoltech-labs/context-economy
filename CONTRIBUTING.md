@@ -20,7 +20,7 @@ npm ci
 npm run -s test:tooling                 # release tooling (node --test)
 npm run -s version:check                # manifests share one version
 claude plugin validate . --strict
-for p in plugins/*/; do claude plugin test "${p%/}"; done   # every Claude Code plugin and the shared core
+(for p in plugins/*/; do claude plugin test "${p%/}" || exit 1; done)   # every Claude Code plugin and the shared core
 bun test extensions                     # Pi extension
 ```
 
@@ -37,8 +37,9 @@ The plugin's `tsconfig.json` extends `.claude-plugin/types/tsconfig.json`, which
 with the host's type declarations, when a session loads the plugin:
 
 ```bash
-claude --plugin-dir "$PWD/plugins/<plugin>"   # start it once, then quit
-npx -p typescript tsc -p plugins/<plugin> --noEmit
+PLUGIN=tool-gateway                              # the plugin to check
+claude --plugin-dir "$PWD/plugins/$PLUGIN"       # start it once, then quit
+npx -p typescript tsc -p "plugins/$PLUGIN" --noEmit
 ```
 
 The generated folder is ignored by git. The Pi extension declares the small part of Pi's API it
