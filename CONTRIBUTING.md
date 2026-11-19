@@ -20,7 +20,7 @@ npm ci
 npm run -s test:tooling                 # release tooling (node --test)
 npm run -s version:check                # manifests share one version
 claude plugin validate . --strict
-claude plugin test plugins/tool-gateway # Claude Code plugin and the shared core
+for p in plugins/*/; do claude plugin test "${p%/}"; done   # every Claude Code plugin and the shared core
 bun test extensions                     # Pi extension
 ```
 
@@ -37,8 +37,8 @@ The plugin's `tsconfig.json` extends `.claude-plugin/types/tsconfig.json`, which
 with the host's type declarations, when a session loads the plugin:
 
 ```bash
-claude --plugin-dir "$PWD/plugins/tool-gateway"   # start it once, then quit
-npx -p typescript tsc -p plugins/tool-gateway --noEmit
+claude --plugin-dir "$PWD/plugins/<plugin>"   # start it once, then quit
+npx -p typescript tsc -p plugins/<plugin> --noEmit
 ```
 
 The generated folder is ignored by git. The Pi extension declares the small part of Pi's API it
@@ -46,8 +46,9 @@ uses as local structural types.
 
 ## Making a change
 
-- Keep to the behaviour in [plugins/tool-gateway/SPEC.md](plugins/tool-gateway/SPEC.md). A change
-  of behaviour changes the spec in the same pull request.
+- Keep to the behaviour in the plugin's `SPEC.md` (`plugins/<plugin>/SPEC.md`, for example
+  [plugins/tool-gateway/SPEC.md](plugins/tool-gateway/SPEC.md)). A change of behaviour changes
+  that spec in the same pull request.
 - Add a test that fails without the change.
 - Match the surrounding code: names, comment density and idiom.
 - Start each new source file with `// SPDX-License-Identifier: Apache-2.0` (`#` in shell and

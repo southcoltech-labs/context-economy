@@ -16,7 +16,7 @@ change to a check, a workflow or this file.
 - [ ] Every commit is signed off by its author, and there are no merge commits (CI). The author is
       someone the project can identify.
 - [ ] The change does what the description says, and nothing else is mixed in.
-- [ ] A change of behaviour changes `plugins/tool-gateway/SPEC.md` in the same pull request.
+- [ ] A change of behaviour changes the plugin's `plugins/<plugin>/SPEC.md` in the same pull request.
 - [ ] A new test fails without the change. No test is deleted, skipped or weakened to make the
       change pass.
 - [ ] A changeset is present, or the pull request is documentation only and labeled `no-release`.
