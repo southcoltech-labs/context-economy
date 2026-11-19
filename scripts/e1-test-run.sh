@@ -24,6 +24,18 @@
 # the account name and paths only). Never the raw transcripts or scrub-context.json.
 set -u
 
+# The credentials named with --pass-env must not reach any helper process (grep, dirname, uname, id, the bootstrap,
+# nvm, prepare): take them out of this script's environment first, with shell builtins only, before anything runs.
+# Their values stay in this shell; the baseline subshell below gives them back. (A bad name is refused later.)
+_prev=""
+for _a in "$@"; do
+  if [ "$_prev" = "--pass-env" ]; then
+    # shellcheck disable=SC2163  # `export -n "$_a"` unexports the variable whose name is in _a, on purpose
+    case "$_a" in ""|[!A-Z]*|*[!A-Z0-9_]*) ;; *) export -n "$_a" ;; esac
+  fi
+  _prev="$_a"
+done
+
 usage() { echo "usage: bash scripts/e1-test-run.sh macos|linux [--drill NAME] [--a VERSION] [--send DIR] [--pass-env NAME] [--yes]" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 OS="$1"; shift
@@ -56,11 +68,6 @@ DIR=$(cd "$(dirname "$0")/.." && pwd) || exit 2
 START="$HOME/e1-start.txt"; END="$HOME/e1-end.txt"
 # The Claude Code installer puts `claude` in ~/.local/bin; the bootstrap puts gitleaks there too.
 export PATH="$HOME/.local/bin:$PATH"
-
-# The key must not reach the bootstrap, the installers, nvm or the prepare run: take the variables out of the
-# environment of this script (their values stay in this shell) and give them back to the baseline run only.
-# shellcheck disable=SC2163  # `export "$n"` exports the variable whose name is in n, on purpose
-for n in ${PASS_NAMES[@]+"${PASS_NAMES[@]}"}; do export -n "$n"; done
 
 # 1. The bootstrap (clean check (a), gitleaks, Node and git). Its output is kept in $START.
 set -o pipefail

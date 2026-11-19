@@ -439,7 +439,7 @@ function testRun({ prepareRc = 0, baselineRc = 0, args = [], env = {}, seeKey = 
 if [ "$1" = "--version" ]; then echo v24.0.0; exit 0; fi
 echo "$2 $3" >> "${log}"
 echo "$*" >> "${log}.full"
-echo "$2:[$DEEPSEEK_API_KEY]" >> "${log}.seen"
+echo "$2:[$DEEPSEEK_API_KEY|$OPENAI_API_KEY]" >> "${log}.seen"
 case "$2" in
   prepare) n=1; name=prepare-2026-11-17; rc=${prepareRc} ;;
   e1b) n=2; name=e1b-2026-11-17; rc=${baselineRc} ;;
@@ -448,7 +448,12 @@ d="$HOME/e1-runs/t1/attempt-$n"; mkdir -p "$d"
 echo secret > "$d/$name.raw.txt"; echo clean > "$d/$name.txt"; echo '{}' > "$d/scrub-context.json"
 exit $rc
 `;
-  writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho "gitleaks:[$DEEPSEEK_API_KEY]" >> "${log}.seen"\necho 8.30.1\n`, { mode: 0o755 });
+  writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho "gitleaks:[$DEEPSEEK_API_KEY|$OPENAI_API_KEY]" >> "${log}.seen"\necho 8.30.1\n`, { mode: 0o755 });
+  // Stand-ins for the helpers the wrapper runs before and around the driver: each records what it inherited, then runs the real one.
+  for (const tool of ["grep", "dirname", "uname", "id", "date", "git"]) {
+    const real = spawn2("sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(bin, tool), `#!/bin/sh\necho "${tool}:[$DEEPSEEK_API_KEY|$OPENAI_API_KEY]" >> "${log}.seen"\nexec "${real}" "$@"\n`, { mode: 0o755 });
+  }
   if (RUN_LABEL === "linux") { fakeNvm({ home }, { loaded: true }); writeFileSync(join(home, ".nvm", "versions", "node", "v24.0.0", "bin", "node"), nodeBody, { mode: 0o755 }); }
   else writeFileSync(join(bin, "node"), nodeBody, { mode: 0o755 });
   const send = join(home, "out");
@@ -481,15 +486,26 @@ test("e1-test-run.sh: the wrong label is refused before anything runs", () => {
   assert.match(r.stderr, /use the other label/);
 });
 
-test("e1-test-run.sh: --pass-env reaches only the baseline run; the bootstrap and prepare never see the value, nor does anything sent", { skip: !RUN_LABEL }, () => {
-  const t = testRun({ args: ["--pass-env", "DEEPSEEK_API_KEY"], env: { DEEPSEEK_API_KEY: "sk-test-secret-value" }, seeKey: true });
-  assert.equal(t.r.status, 0, t.r.stdout + t.r.stderr);
-  assert.equal(t.full.length, 2);
-  assert.doesNotMatch(t.full[0], /--pass-env/, "prepare is not told about the key");
-  assert.match(t.full[1], /^scripts\/e1-run\.mjs e1b --part baseline .*--pass-env DEEPSEEK_API_KEY$/);
-  assert.deepEqual(t.seen, ["gitleaks:[]", "prepare:[]", "e1b:[sk-test-secret-value]"], "who saw the value: the bootstrap's gitleaks and prepare nothing, only the baseline the key");
-  for (const f of t.files) assert.ok(!readFileSync(join(t.send, f), "utf8").includes("sk-test-secret-value"), f);
-  assert.ok(!(t.r.stdout + t.r.stderr).includes("sk-test-secret-value"));
+test("e1-test-run.sh: --pass-env reaches only the baseline run; no helper, the bootstrap or prepare ever sees a value, nor does anything sent (one name and two)", { skip: !RUN_LABEL }, () => {
+  for (const [args, env, base] of [
+    [["--pass-env", "DEEPSEEK_API_KEY"], { DEEPSEEK_API_KEY: "sk-test-secret-value" }, "[sk-test-secret-value|]"],
+    [["--pass-env", "DEEPSEEK_API_KEY", "--pass-env", "OPENAI_API_KEY"], { DEEPSEEK_API_KEY: "sk-test-secret-value", OPENAI_API_KEY: "sk-second-value" }, "[sk-test-secret-value|sk-second-value]"],
+  ]) {
+    const t = testRun({ args, env });
+    assert.equal(t.r.status, 0, t.r.stdout + t.r.stderr);
+    assert.equal(t.full.length, 2);
+    assert.doesNotMatch(t.full[0], /--pass-env/, "prepare is not told about the key");
+    assert.match(t.full[1], /^scripts\/e1-run\.mjs e1b --part baseline .*--pass-env DEEPSEEK_API_KEY/);
+    const seenBy = (who) => t.seen.filter((l) => l.startsWith(`${who}:`)).map((l) => l.slice(who.length + 1));
+    for (const who of ["grep", "dirname", "uname", "id", "date", "git", "gitleaks", "prepare"]) {
+      const lines = seenBy(who);
+      if (who !== "id" && who !== "prepare") assert.ok(lines.length > 0, `${who} was observed`);
+      assert.deepEqual(lines.filter((l) => l !== "[|]"), [], `${who} inherited a value: ${lines}`);
+    }
+    assert.deepEqual(seenBy("e1b"), [base], "only the baseline run gets the values");
+    for (const f of t.files) { const text = readFileSync(join(t.send, f), "utf8"); assert.ok(!text.includes("sk-test-secret-value") && !text.includes("sk-second-value"), f); }
+    assert.ok(!/sk-test-secret-value|sk-second-value/.test(t.r.stdout + t.r.stderr));
+  }
 });
 
 test("e1-test-run.sh: a name that is not a provider key is refused before the bootstrap, whether or not it is set", { skip: !RUN_LABEL }, () => {

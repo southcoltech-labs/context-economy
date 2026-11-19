@@ -490,6 +490,9 @@ export async function main(argv, deps = defaultDeps()) {
   if (!["e1a", "e1b", "prepare"].includes(command) || !home) { log.error(USAGE); return 2; }
   const pass = passEnv(argv, env);
   if (pass.error) { log.error(`e1-run: ${pass.error}`); return 2; }
+  // The passed variables are CONSUMED: removed from `deps.env` (which is `process.env` for the command line), so a
+  // caller that reuses the object must supply them again before a later run. An injected plain object is sanitized, a
+  // distinct ambient `process.env` is not.
   // The driver's own children (gitleaks, stty, installers) must not inherit the key: it is held here, and only
   // the Pi host gets it. Pi's own tool subprocesses inherit it from Pi; that reach cannot be removed.
   for (const name of Object.keys(pass.values)) delete env[name];
@@ -607,7 +610,14 @@ function scrubAttempt(argv, deps) {
   // The saved path is trusted only when it is one the run itself could have chosen: the clone's config or this driver's own.
   if (![join(c.clone, ".gitleaks.toml"), join(HERE, "..", ".gitleaks.toml")].some((ok) => samePath(ok, config))) { log.error(`e1-run: scrub-context.json names a gitleaks config that is neither the clone's nor the driver's own: ${config}`); return 2; }
   if (!existsSync(config)) { log.error(`e1-run: ${config} is missing: the scrubber must use the project's gitleaks config`); return 2; }
-  const r = scrubToFile(deps, { raw: readFileSync(rawFile, "utf8"), outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt });
+  // The run held credentials named with --pass-env: their names are saved (never their values), and the exact-value
+  // redaction needs the values again. Without them the shareable copy cannot be made safely: fail closed.
+  if (c.passEnvNames !== undefined && (!Array.isArray(c.passEnvNames) || !c.passEnvNames.every((n) => typeof n === "string"))) { log.error("e1-run: scrub-context.json holds a bad passEnvNames"); return 2; }
+  const need = c.passEnvNames ?? [];
+  const again = passEnv(need.flatMap((n) => ["--pass-env", n]), deps.env);
+  if (again.error) { log.error(`e1-run: the run that made this attempt held ${need.join(", ")} (--pass-env), and the scrubbed copy must remove its value. ${again.error.replace(/^--pass-env /, "")}. No scrubbed copy written.`); return 2; }
+  for (const n of need) delete deps.env[n]; // as in a run: the scrubber's children never inherit it
+  const r = scrubToFile(deps, { raw: readFileSync(rawFile, "utf8"), outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt, secrets: again.values });
   if (!r.ok) { log.error(`e1-run: NO scrubbed copy written: ${r.reason}. The raw transcript stays private in ${attempt}.`); return 3; }
   log.log(`e1-run: send ${r.file} (the scrubbed copy, ${r.hits} hits listed at its end). The raw transcript and scrub-context.json stay private in ${attempt}.`);
   for (const note of r.notes) log.error(`e1-run: ${note}`);
@@ -640,7 +650,7 @@ function scrubFile(ctx, rawFile, outFile) {
   const label = ctx.vars.platform?.startsWith("linux") ? "linux" : "mac";
   // E14: what a later `scrub --attempt` needs, saved before the scrub so a failed second pass can be redone.
   const contextFile = join(ctx.attemptDir, "scrub-context.json");
-  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans }, null, 1), { mode: 0o600 });
+  writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans, passEnvNames: Object.keys(ctx.passEnv ?? {}) }, null, 1), { mode: 0o600 });
   return scrubToFile(ctx.deps, { raw, rawFile, outFile, config, spans: ctx.assertSpans, label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, tmpDir: ctx.attemptDir, secrets: ctx.passEnv });
 }
 

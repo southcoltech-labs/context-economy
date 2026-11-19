@@ -1074,7 +1074,7 @@ test("E14: the run saves a scrub context; `scrub --attempt` rebuilds a missing c
   const ctxFile = join(dir, "scrub-context.json");
   assert.equal(mode(ctxFile), 0o600);
   const saved = JSON.parse(readFileSync(ctxFile, "utf8"));
-  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "config", "home", "hostname", "label", "name", "realHome"]);
+  assert.deepEqual(Object.keys(saved).sort(), ["assertSpans", "clone", "config", "home", "hostname", "label", "name", "passEnvNames", "realHome"]);
   assert.equal(saved.assertSpans.length, 1);
   // refuses to overwrite
   assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
@@ -1086,6 +1086,81 @@ test("E14: the run saves a scrub context; `scrub --attempt` rebuilds a missing c
   assert.equal(mode(join(dir, "0.1.3-macos-arm64.txt")), 0o600);
   // no context, no scrub
   assert.equal(await w.run(["scrub", "--attempt", tmp("e1-empty-")]), 2);
+});
+
+// --- --pass-env and `scrub --attempt`: the retry must remove the credential too, or make no copy ---
+
+const REFLECT = "plain-words-key-4711";
+async function reflectingRun(over = {}) {
+  const w = world({ env: { DEEPSEEK_API_KEY: REFLECT }, ...over });
+  w.parts.e1a = () => [{ id: "A", run: [["echo"]], expect: [] }];
+  w.onExec = () => ({ code: 0, out: `the server said: ${REFLECT} is not valid\n` });
+  const code = await e1a(w, ["--pass-env", "DEEPSEEK_API_KEY"]);
+  return { w, code, dir: attempt(w), clean: join(attempt(w), "0.1.3-macos-arm64.txt") };
+}
+
+test("--pass-env: a rebuild after a normal run needs the key again, removes it by value, and the saved context holds the name only", async () => {
+  const { w, code, dir, clean } = await reflectingRun();
+  assert.equal(code, 0);
+  const ctxText = readFileSync(join(dir, "scrub-context.json"), "utf8");
+  assert.deepEqual(JSON.parse(ctxText).passEnvNames, ["DEEPSEEK_API_KEY"]);
+  assert.ok(!ctxText.includes(REFLECT), "the value is never saved");
+  rmSync(clean);
+  // not re-supplied: fail closed, no copy
+  w.deps.env.DEEPSEEK_API_KEY = undefined; delete w.deps.env.DEEPSEEK_API_KEY;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+  assert.match(w.err.join("\n"), /DEEPSEEK_API_KEY.*not set in this shell.*No scrubbed copy written/s);
+  assert.equal(existsSync(clean), false);
+  // re-supplied: rebuilt without the value
+  w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 0);
+  const text = readFileSync(clean, "utf8");
+  assert.ok(!text.includes(REFLECT));
+  assert.match(text, /\[scrubbed:pass-env DEEPSEEK_API_KEY\]/);
+  assert.equal(w.deps.env.DEEPSEEK_API_KEY, undefined, "consumed, as in a run");
+});
+
+test("--pass-env: a failed first scrub, then a rebuild: no copy without the key, a clean one with it", async () => {
+  const { w, code, dir, clean } = await reflectingRun({ deps: { gitleaksBin: join(tmpdir(), "no-gitleaks-here") } });
+  assert.equal(code, 3);
+  assert.equal(existsSync(clean), false);
+  w.deps.gitleaksBin = undefined; // the scrubber is back
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2, "the key is not in this shell");
+  assert.equal(existsSync(clean), false);
+  w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 0);
+  assert.ok(!readFileSync(clean, "utf8").includes(REFLECT));
+});
+
+test("--pass-env: a saved name the driver does not pass is refused at rebuild", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  const f = join(dir, "scrub-context.json");
+  const c = JSON.parse(readFileSync(f, "utf8")); c.passEnvNames = ["NODE_OPTIONS"]; writeFileSync(f, JSON.stringify(c));
+  w.deps.env.NODE_OPTIONS = "--x";
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+  assert.match(w.err.join("\n"), /not a provider key/);
+  assert.equal(existsSync(clean), false);
+});
+
+test("--pass-env: the re-supplied key is not inherited by the rebuild's scrubber (real subprocess)", async () => {
+  const home = tmp("e1-home-"); const bin = tmp("e1-bin-"); const mark = join(home, "gitleaks-saw");
+  const realGitleaks = execFileSync("sh", ["-c", "command -v gitleaks"], { encoding: "utf8" }).trim();
+  writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho "[$DEEPSEEK_API_KEY]" >> "${mark}"\nexec "${realGitleaks}" "$@"\n`, { mode: 0o755 });
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  const saved = { ...process.env };
+  for (const k of Object.keys(process.env)) delete process.env[k];
+  Object.assign(process.env, { HOME: w.home, PATH: `${bin}:${saved.PATH}`, DEEPSEEK_API_KEY: REFLECT });
+  try {
+    w.deps.env = process.env;
+    assert.equal(await w.run(["scrub", "--attempt", dir]), 0);
+    const saw = readFileSync(mark, "utf8");
+    assert.ok(saw.includes("[]") && !saw.includes(REFLECT), saw);
+  } finally {
+    for (const k of Object.keys(process.env)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
 });
 
 test("E10: the scan copy goes to the attempt folder, not the system temp folder", async () => {
