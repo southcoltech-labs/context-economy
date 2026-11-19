@@ -490,6 +490,9 @@ export async function main(argv, deps = defaultDeps()) {
   if (!["e1a", "e1b", "prepare"].includes(command) || !home) { log.error(USAGE); return 2; }
   const pass = passEnv(argv, env);
   if (pass.error) { log.error(`e1-run: ${pass.error}`); return 2; }
+  // The driver's own children (gitleaks, stty, installers) must not inherit the key: it is held here, and only
+  // the Pi host gets it. Pi's own tool subprocesses inherit it from Pi; that reach cannot be removed.
+  for (const name of Object.keys(pass.values)) delete env[name];
 
   const vars = {
     command, staging: flag(argv, "staging") ?? "southcoltech-labs/context-economy",
@@ -638,7 +641,7 @@ function scrubFile(ctx, rawFile, outFile) {
   // E14: what a later `scrub --attempt` needs, saved before the scrub so a failed second pass can be redone.
   const contextFile = join(ctx.attemptDir, "scrub-context.json");
   writeFileSync(contextFile, JSON.stringify({ name: basename(outFile, ".txt"), label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, clone: ctx.vars.clone, config, assertSpans: ctx.assertSpans }, null, 1), { mode: 0o600 });
-  return scrubToFile(ctx.deps, { raw, rawFile, outFile, config, spans: ctx.assertSpans, label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, tmpDir: ctx.attemptDir });
+  return scrubToFile(ctx.deps, { raw, rawFile, outFile, config, spans: ctx.assertSpans, label, home: ctx.env.HOME, hostname: deps.hostname, realHome: deps.realHome, tmpDir: ctx.attemptDir, secrets: ctx.passEnv });
 }
 
 const samePath = (a, b) => {
@@ -647,9 +650,9 @@ const samePath = (a, b) => {
 };
 
 /** The scrub itself, shared by a run's end and `scrub --attempt`. */
-function scrubToFile(deps, { raw, outFile, config, spans, label, home, hostname: host, realHome, tmpDir }) {
+function scrubToFile(deps, { raw, outFile, config, spans, label, home, hostname: host, realHome, tmpDir, secrets }) {
   const homeSame = samePath(realHome, home);
-  const r = scrub(raw, { config: deps.gitleaksConfig ?? config, bin: deps.gitleaksBin, run: deps.gitleaksRun, tmp: deps.tmp ?? tmpDir, hostname: host, label, realHome: homeSame ? undefined : realHome });
+  const r = scrub(raw, { config: deps.gitleaksConfig ?? config, bin: deps.gitleaksBin, run: deps.gitleaksRun, tmp: deps.tmp ?? tmpDir, hostname: host, label, realHome: homeSame ? undefined : realHome, secrets });
   if (!r.ok) return r;
   const lineOf = (offset) => raw.slice(0, offset).split("\n").length;
   const notes = spans.filter((s) => overlaps(r.spans, s.start, s.end)).map((s) => `an assertion of step ${s.step} matched inside a scrubbed span (raw line ${lineOf(s.start)}): its evidence is not visible in the scrubbed copy`);

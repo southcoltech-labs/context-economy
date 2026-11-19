@@ -144,12 +144,15 @@ function mergeSpans(spans) {
 /**
  * Scrubs a complete text. `options`: `config` (the project's `.gitleaks.toml`), `bin`, `run`
  * (a spawnSync stand-in, for tests), `hostname` and `label` (what replaces the machine name),
- * `realHome` (the OS user's own home, `os.userInfo().homedir`), `tmp`.
+ * `realHome` (the OS user's own home, `os.userInfo().homedir`), `tmp`, and `secrets` (name to value: credentials the
+ * operator handed to a host with `--pass-env`; gitleaks cannot know an arbitrary value, so each exact occurrence is
+ * replaced by `[scrubbed:pass-env NAME]`, and a copy that still holds one is withheld).
  * Returns `{ ok: true, text, hits, spans }` (a hit is `{ rule, line }`, never a value), or
  * `{ ok: false, reason }` with no text: the caller writes no scrubbed copy.
  */
 export function scrub(raw, options = {}) {
-  const { config, bin, run, tmp = tmpdir(), hostname, label = "host", realHome } = options;
+  const { config, bin, run, tmp = tmpdir(), hostname, label = "host", realHome, secrets = {} } = options;
+  const secretValues = Object.entries(secrets).filter(([, v]) => typeof v === "string" && v.length > 0);
   const gl = { bin, config, run, tmp };
   const probe = checkGitleaks({ bin, run });
   if (!probe.ok) return probe;
@@ -179,6 +182,12 @@ export function scrub(raw, options = {}) {
     }
   }
 
+  for (const [name, value] of secretValues) {
+    for (const m of raw.matchAll(new RegExp(escapeRe(value), "g"))) spans.push({ rule: `pass-env ${name}`, start: m.index, end: m.index + m[0].length });
+    // The value split by the transcript's own line wrapping: found in the unwrapped view, mapped back.
+    for (const m of un.text.matchAll(new RegExp(escapeRe(value), "g"))) spans.push({ rule: `pass-env ${name}`, start: un.map[m.index], end: un.map[m.index + m[0].length - 1] + 1 });
+  }
+
   const merged = mergeSpans(spans);
   const starts = lineStarts(raw);
   const lineOf = (offset) => starts.findLastIndex((s) => s <= offset) + 1;
@@ -197,6 +206,9 @@ export function scrub(raw, options = {}) {
     const again = scan(view, gl);
     if (!again.ok) return { ok: false, reason: `second pass failed: ${again.reason}` };
     if (again.findings.length) return { ok: false, reason: `second pass found ${again.findings.length} finding(s) the scrub left in place; scrubbed copy deleted` };
+  }
+  for (const [name, value] of secretValues) {
+    if (text.includes(value) || unwrap(text).text.includes(value)) return { ok: false, reason: `the value of ${name} is still in the scrubbed text; scrubbed copy deleted` };
   }
   return { ok: true, text, hits, spans: merged.map(({ start, end }) => ({ start, end })) };
 }

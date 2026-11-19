@@ -514,7 +514,7 @@ export function prepareSteps(vars) {
     ]) },
     { id: "P.3", title: "Sign in to Claude Code and Pi (operator)",
       // Whether the sign-ins worked is the operator's to say, not the driver's to check (it never opens credential files).
-      pause: { say: ["Do this in a new terminal tab: it loads the PATH the installers set up (`claude` is in ~/.local/bin; this tab is waiting for you).", "Do the sign-ins in that separate tab, not in this one: this tab is the driver's prompt.", "Sign in to Claude Code: run `claude`, sign in, then /exit.", "Sign in to Pi: run `pi`, sign in, then quit. Skip this if you started the run with --pass-env: Pi then reads its API key from that variable.", "Press Enter below only when both are signed in."] } },
+      pause: { say: ["Do this in a new terminal tab: it loads the PATH the installers set up (`claude` is in ~/.local/bin; this tab is waiting for you).", "Do the sign-ins in that separate tab, not in this one: this tab is the driver's prompt.", "Sign in to Claude Code: run `claude`, sign in, then /exit.", "Sign in to Pi: run `pi`, sign in, then quit. Skip this if you started the run with --pass-env: Pi then reads its API key from that variable.", "Press Enter below only when Claude Code is signed in and Pi has its credentials (a saved sign-in, or the key you named with --pass-env; this does not check that Pi will use it)."] } },
     { id: "P.4", title: "Clone staging (run sheet 0.2)", ...seq([
       { label: `git clone https://github.com/${staging}.git ${clone}, if not cloned`, fn: async (ctx) => {
         if (!existsSync(join(clone, ".git"))) return ctx.deps.exec("git", ["clone", `https://github.com/${staging}.git`, clone], { cwd: ctx.cwd, env: ctx.env });

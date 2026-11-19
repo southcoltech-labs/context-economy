@@ -5,14 +5,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { chmodSync, copyFileSync, cpSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOSTS, HostVersions, main, newAttempt, loadProofModules, parseVersionLine, realExec, realLaunchHost, realUi } from "./e1-run.mjs";
-import { ALLOWED_VARIABLES, REFUSED_VARIABLES } from "./e1-helpers.mjs";
+import { ALLOWED_VARIABLES, REFUSED_VARIABLES, passEnvNames } from "./e1-helpers.mjs";
 import { appendFileSync } from "node:fs";
 import proofToolGateway from "./proof/tool-gateway.mjs";
 
@@ -184,13 +184,69 @@ test("--pass-env: Claude Code never gets it", async () => {
   assert.equal(seen?.DEEPSEEK_API_KEY, undefined);
 });
 
+test("--pass-env: the reviewed list is clean: unique, provider-key shaped, nothing for Claude Code, the shell or the plugin", () => {
+  const names = passEnvNames();
+  assert.ok(names.length > 20 && names.includes("DEEPSEEK_API_KEY") && names.includes("OPENAI_API_KEY"));
+  assert.equal(new Set(names).size, names.length);
+  for (const n of names) {
+    assert.match(n, /^[A-Z][A-Z0-9_]*(_API_KEY|_BEARER_TOKEN_BEDROCK)$/);
+    assert.ok(!/^(ANTHROPIC_|CLAUDE|CE_|PI_)/.test(n) && !ALLOWED_VARIABLES.includes(n) && !REFUSED_VARIABLES.includes(n), n);
+  }
+});
+
+for (const name of ["DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"]) {
+  test(`--pass-env ${name} is admitted when set`, async () => {
+    const w = world({ env: { [name]: SECRET } });
+    w.parts.e1a = () => [{ id: "A", run: [["echo"]] }];
+    assert.equal(await e1a(w, ["--pass-env", name]), 0);
+  });
+}
+
+test("--pass-env: the driver's own children do not inherit the key, whatever their options (real subprocess)", async () => {
+  const home = tmp("e1-home-"); const bin = tmp("e1-bin-"); const mark = join(home, "gitleaks-saw");
+  const realGitleaks = execFileSync("sh", ["-c", "command -v gitleaks"], { encoding: "utf8" }).trim(); // a wrapper: record, then run the real one
+  writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho "[$DEEPSEEK_API_KEY]" >> "${mark}"\nexec "${realGitleaks}" "$@"\n`, { mode: 0o755 });
+  const saved = { ...process.env };
+  for (const k of Object.keys(process.env)) delete process.env[k]; // a clean environment, whatever this shell has set
+  Object.assign(process.env, { HOME: home, PATH: `${bin}:${saved.PATH}`, DEEPSEEK_API_KEY: SECRET });
+  try {
+    const w = world({ deps: { env: process.env, gitleaksBin: undefined } });
+    w.parts.e1a = () => [{ id: "A", run: [["echo"]] }];
+    assert.equal(await e1a(w, ["--pass-env", "DEEPSEEK_API_KEY"]), 0);
+    assert.equal(process.env.DEEPSEEK_API_KEY, undefined, "the driver removed the key from its own environment");
+    const saw = existsSync(mark) ? readFileSync(mark, "utf8") : "";
+    assert.ok(saw.includes("[]") && !saw.includes(SECRET), `gitleaks ran and saw no key: ${saw}`);
+  } finally {
+    for (const k of Object.keys(process.env)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test("--pass-env: a credential reflected into the transcript is scrubbed by value, though no pattern knows it", async () => {
+  const w = world({ env: { DEEPSEEK_API_KEY: "plain-words-key-4711" } });
+  w.parts.e1a = () => [{ id: "A", run: [["echo"]], expect: [] }];
+  w.onExec = () => ({ code: 0, out: "the server said: plain-words-key-4711 is not valid\n" });
+  assert.equal(await e1a(w, ["--pass-env", "DEEPSEEK_API_KEY"]), 0);
+  const clean = readFileSync(join(attempt(w), "0.1.3-macos-arm64.txt"), "utf8");
+  assert.ok(!clean.includes("plain-words-key-4711"));
+  assert.match(clean, /the server said: \[scrubbed:pass-env DEEPSEEK_API_KEY\] is not valid/);
+  assert.ok(raw(w).includes("plain-words-key-4711"), "the raw transcript is private and unchanged");
+});
+
 for (const [name, env, why] of [
   ["DEEPSEEK_API_KEY", {}, /DEEPSEEK_API_KEY is not set in this shell/],
   ["DEEPSEEK_API_KEY", { DEEPSEEK_API_KEY: "" }, /not set in this shell/],
-  ["ANTHROPIC_API_KEY", { ANTHROPIC_API_KEY: "x" }, /not passed to Pi/],
-  ["CLAUDE_CODE_OAUTH_TOKEN", { CLAUDE_CODE_OAUTH_TOKEN: "x" }, /not passed to Pi/],
-  ["CE_SOMETHING", { CE_SOMETHING: "x" }, /not passed to Pi/],
-  ["PATH", {}, /not passed to Pi/],
+  ["ANTHROPIC_API_KEY", { ANTHROPIC_API_KEY: "x" }, /not a provider key/],
+  ["CLAUDE_CODE_OAUTH_TOKEN", { CLAUDE_CODE_OAUTH_TOKEN: "x" }, /not a provider key/],
+  ["NODE_OPTIONS", { NODE_OPTIONS: "--require /x" }, /not a provider key/],
+  ["LD_PRELOAD", { LD_PRELOAD: "/x.so" }, /not a provider key/],
+  ["BASH_ENV", { BASH_ENV: "/x" }, /not a provider key/],
+  ["HTTPS_PROXY", { HTTPS_PROXY: "http://x" }, /not a provider key/],
+  ["GITHUB_TOKEN", { GITHUB_TOKEN: "x" }, /not a provider key/],
+  ["PI_OFFLINE", { PI_OFFLINE: "1" }, /not a provider key/],
+  ["AWS_PROFILE", { AWS_PROFILE: "x" }, /not a provider key/],
+  ["CE_SOMETHING", { CE_SOMETHING: "x" }, /not a provider key/],
+  ["PATH", {}, /not a provider key/],
   ["lower", { lower: "x" }, /upper-case variable name/],
 ]) {
   test(`--pass-env ${name} is refused with exit 2 and touches nothing (${Object.keys(env).length ? "set" : "unset"})`, async () => {

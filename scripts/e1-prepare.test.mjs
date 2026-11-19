@@ -431,7 +431,7 @@ test("Linux nvm steps: install 24 then use 24 run; a failing install, or a Node 
 const THIS = spawn2("uname", ["-sm"], { encoding: "utf8" }).stdout.trim();
 const RUN_LABEL = { "Darwin arm64": "macos", "Linux x86_64": "linux" }[THIS];
 
-function testRun({ prepareRc = 0, baselineRc = 0, args = [], env = {} } = {}) {
+function testRun({ prepareRc = 0, baselineRc = 0, args = [], env = {}, seeKey = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), "e1run-")); const bin = mkdtempSync(join(tmpdir(), "e1runbin-"));
   const log = join(home, "driver-calls");
   // The fake node answers --version and plays the driver: it writes a raw and a scrubbed transcript per run.
@@ -439,6 +439,7 @@ function testRun({ prepareRc = 0, baselineRc = 0, args = [], env = {} } = {}) {
 if [ "$1" = "--version" ]; then echo v24.0.0; exit 0; fi
 echo "$2 $3" >> "${log}"
 echo "$*" >> "${log}.full"
+echo "$2:[$DEEPSEEK_API_KEY]" >> "${log}.seen"
 case "$2" in
   prepare) n=1; name=prepare-2026-11-17; rc=${prepareRc} ;;
   e1b) n=2; name=e1b-2026-11-17; rc=${baselineRc} ;;
@@ -447,12 +448,12 @@ d="$HOME/e1-runs/t1/attempt-$n"; mkdir -p "$d"
 echo secret > "$d/$name.raw.txt"; echo clean > "$d/$name.txt"; echo '{}' > "$d/scrub-context.json"
 exit $rc
 `;
-  writeFileSync(join(bin, "gitleaks"), "#!/bin/sh\necho 8.30.1\n", { mode: 0o755 });
+  writeFileSync(join(bin, "gitleaks"), `#!/bin/sh\necho "gitleaks:[$DEEPSEEK_API_KEY]" >> "${log}.seen"\necho 8.30.1\n`, { mode: 0o755 });
   if (RUN_LABEL === "linux") { fakeNvm({ home }, { loaded: true }); writeFileSync(join(home, ".nvm", "versions", "node", "v24.0.0", "bin", "node"), nodeBody, { mode: 0o755 }); }
   else writeFileSync(join(bin, "node"), nodeBody, { mode: 0o755 });
   const send = join(home, "out");
   const r = spawn2("/bin/bash", [join(dirname(fileURLToPath(import.meta.url)), "e1-test-run.sh"), RUN_LABEL, "--send", send, ...args], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, ...env }, encoding: "utf8" });
-  return { r, home, full: existsSync(`${log}.full`) ? readFileSync(`${log}.full`, "utf8").trim().split("\n") : [], send, calls: existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [], files: existsSync(send) ? readdirSync(send).sort() : [] };
+  return { r, home, seen: existsSync(`${log}.seen`) ? [...new Set(readFileSync(`${log}.seen`, "utf8").trim().split("\n"))] : [], full: existsSync(`${log}.full`) ? readFileSync(`${log}.full`, "utf8").trim().split("\n") : [], send, calls: existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [], files: existsSync(send) ? readdirSync(send).sort() : [] };
 }
 
 test("e1-test-run.sh: bootstrap, prepare, baseline, then only the scrubbed files are collected", { skip: !RUN_LABEL }, () => {
@@ -480,13 +481,24 @@ test("e1-test-run.sh: the wrong label is refused before anything runs", () => {
   assert.match(r.stderr, /use the other label/);
 });
 
-test("e1-test-run.sh: --pass-env names the variable to both driver runs; the value never appears in what is sent", { skip: !RUN_LABEL }, () => {
-  const t = testRun({ args: ["--pass-env", "DEEPSEEK_API_KEY"], env: { DEEPSEEK_API_KEY: "sk-test-secret-value" } });
+test("e1-test-run.sh: --pass-env reaches only the baseline run; the bootstrap and prepare never see the value, nor does anything sent", { skip: !RUN_LABEL }, () => {
+  const t = testRun({ args: ["--pass-env", "DEEPSEEK_API_KEY"], env: { DEEPSEEK_API_KEY: "sk-test-secret-value" }, seeKey: true });
   assert.equal(t.r.status, 0, t.r.stdout + t.r.stderr);
   assert.equal(t.full.length, 2);
-  for (const line of t.full) assert.match(line, /--pass-env DEEPSEEK_API_KEY$/);
+  assert.doesNotMatch(t.full[0], /--pass-env/, "prepare is not told about the key");
+  assert.match(t.full[1], /^scripts\/e1-run\.mjs e1b --part baseline .*--pass-env DEEPSEEK_API_KEY$/);
+  assert.deepEqual(t.seen, ["gitleaks:[]", "prepare:[]", "e1b:[sk-test-secret-value]"], "who saw the value: the bootstrap's gitleaks and prepare nothing, only the baseline the key");
   for (const f of t.files) assert.ok(!readFileSync(join(t.send, f), "utf8").includes("sk-test-secret-value"), f);
   assert.ok(!(t.r.stdout + t.r.stderr).includes("sk-test-secret-value"));
+});
+
+test("e1-test-run.sh: a name that is not a provider key is refused before the bootstrap, whether or not it is set", { skip: !RUN_LABEL }, () => {
+  for (const name of ["NODE_OPTIONS", "LD_PRELOAD", "HTTPS_PROXY", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"]) {
+    const t = testRun({ args: ["--pass-env", name], env: { [name]: "x" } });
+    assert.equal(t.r.status, 2, name + t.r.stdout + t.r.stderr);
+    assert.match(t.r.stderr, /not a provider key/);
+    assert.equal(existsSync(join(t.home, "e1-start.txt")), false, `${name}: the bootstrap did not run`);
+  }
 });
 
 test("e1-test-run.sh: --pass-env of a variable that is not set stops at once, before the bootstrap", { skip: !RUN_LABEL }, () => {
