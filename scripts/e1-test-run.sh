@@ -4,13 +4,15 @@
 # One command for a real E1 try in a clean account: the bootstrap, then `prepare`, then the baseline,
 # then the files to send collected in one folder. It replaces the copy-and-paste of those steps.
 #
-#   bash scripts/e1-test-run.sh macos|linux [--drill NAME] [--a VERSION] [--send DIR] [--yes]
+#   bash scripts/e1-test-run.sh macos|linux [--drill NAME] [--a VERSION] [--send DIR] [--pass-env NAME] [--yes]
 #
 #   macos   expects Darwin arm64    --platform macos-arm64    files go to /Users/Shared/context-economy-shared/<account>
 #   linux   expects Linux x86_64    --platform linux-x86_64   files go to ~/e1-send
 #   --drill NAME    the drill folder under ~/e1-runs (default t1)
 #   --a VERSION     the version the baseline installs from `release` (default 0.1.2)
 #   --send DIR      where the files to send are copied
+#   --pass-env NAME the name of a variable that holds the provider key Pi reads (for example DEEPSEEK_API_KEY).
+#                   Export it in this shell first; it reaches only the Pi host step, the value is never printed. Repeatable.
 #   --yes           on Linux, do not ask before the nvm installer is fetched and run (the bootstrap's --yes)
 #
 # The operator still answers the pauses (the sign-ins at P.3, the two host sessions in the baseline).
@@ -19,15 +21,20 @@
 # the account name and paths only). Never the raw transcripts or scrub-context.json.
 set -u
 
-usage() { echo "usage: bash scripts/e1-test-run.sh macos|linux [--drill NAME] [--a VERSION] [--send DIR] [--yes]" >&2; exit 2; }
+usage() { echo "usage: bash scripts/e1-test-run.sh macos|linux [--drill NAME] [--a VERSION] [--send DIR] [--pass-env NAME] [--yes]" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 OS="$1"; shift
-DRILL=t1; A_VERSION=0.1.2; SEND=""; BOOT_ARGS=()
+DRILL=t1; A_VERSION=0.1.2; SEND=""; BOOT_ARGS=(); PASS_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --drill) [ $# -ge 2 ] || usage; DRILL="$2"; shift 2 ;;
     --a) [ $# -ge 2 ] || usage; A_VERSION="$2"; shift 2 ;;
     --send) [ $# -ge 2 ] || usage; SEND="$2"; shift 2 ;;
+    --pass-env) [ $# -ge 2 ] || usage
+      case "$2" in [A-Z]*) ;; *) usage ;; esac
+      case "$2" in *[!A-Z0-9_]*) usage ;; esac
+      [ -n "${!2:-}" ] || { echo "$2 is not set in this shell: export it first (or put it in the account's shell profile), then run again" >&2; exit 2; }
+      PASS_ARGS+=(--pass-env "$2"); shift 2 ;;
     --yes) BOOT_ARGS+=(--yes); shift ;;
     *) usage ;;
   esac
@@ -57,8 +64,8 @@ if [ "$rc" = 0 ]; then
   # shellcheck disable=SC1091
   if [ "$OS" = linux ] && [ -s "$HOME/.nvm/nvm.sh" ]; then set +u; . "$HOME/.nvm/nvm.sh"; nvm use 24 >/dev/null; set -u; fi
   if cd "$DIR"; then
-    node scripts/e1-run.mjs prepare --platform "$PLATFORM" --drill "$DRILL" \
-      && node scripts/e1-run.mjs e1b --part baseline --a "$A_VERSION" --drill "$DRILL"
+    node scripts/e1-run.mjs prepare --platform "$PLATFORM" --drill "$DRILL" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} \
+      && node scripts/e1-run.mjs e1b --part baseline --a "$A_VERSION" --drill "$DRILL" ${PASS_ARGS[@]+"${PASS_ARGS[@]}"}
     rc=$?
   else
     rc=2

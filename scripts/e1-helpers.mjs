@@ -33,6 +33,27 @@ export function allowedEnv(env) {
 }
 
 /**
+ * The variables named by `--pass-env NAME` (repeatable): what Pi's provider key needs, for example
+ * DEEPSEEK_API_KEY, which the allow-list would otherwise drop. Returns `{ values }` (name to value) or
+ * `{ error }`. Refused: a name that is not an upper-case variable name, one that is already allowed or
+ * refused, and any ANTHROPIC_*, CLAUDE* or CE_* name (those change Claude Code or the plugin under test).
+ * A name that is not set, or is empty, in this shell is an error here, at the start, not minutes later
+ * when Pi asks for a key. Only names are ever printed, never values.
+ */
+export function passEnv(argv, env) {
+  const names = [];
+  for (let k = 0; k < argv.length; k++) if (argv[k] === "--pass-env") names.push(argv[k + 1]);
+  const values = {};
+  for (const name of names) {
+    if (typeof name !== "string" || !/^[A-Z][A-Z0-9_]*$/.test(name)) return { error: "--pass-env takes an upper-case variable name, such as DEEPSEEK_API_KEY" };
+    if (ALLOWED_VARIABLES.includes(name) || REFUSED_VARIABLES.includes(name) || /^(ANTHROPIC_|CLAUDE|CE_)/.test(name)) return { error: `--pass-env ${name}: this variable is not passed to Pi (the driver sets it, or it would change Claude Code or the plugin under test)` };
+    if (!env[name]) return { error: `--pass-env ${name}: ${name} is not set in this shell. Export it in the shell that starts the run (or in the account's shell profile), then start again` };
+    values[name] = env[name];
+  }
+  return { values };
+}
+
+/**
  * Why `cmd args` must not run, or undefined. Exactly the plain host updates are refused: `claude update`
  * and `pi update` with no further arguments. `claude plugin update …` and `pi update --extensions` are
  * README §3's update and must run.

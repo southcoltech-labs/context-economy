@@ -146,6 +146,62 @@ for (const name of REFUSED_VARIABLES) {
   });
 }
 
+// --- --pass-env: a provider key for Pi, and only for Pi ---
+
+const SECRET = "sk-test-secret-value";
+const piStep = () => [{ id: "H", human: { host: "pi", say: ["x"], evidence: EVID }, after: [OK] }];
+
+test("--pass-env: the named variable reaches the Pi host and nothing else; the value is never written", async () => {
+  const w = world({ env: { DEEPSEEK_API_KEY: SECRET, OTHER_KEY: "no" } });
+  const launched = [];
+  w.deps.launchHost = async (host, o) => { launched.push({ host, env: o.env }); return { code: 0, signal: null }; };
+  w.parts.e1a = () => [{ id: "A", run: [["echo"]] }, ...piStep()];
+  await e1a(w, ["--pass-env", "DEEPSEEK_API_KEY"]);
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0].env.DEEPSEEK_API_KEY, SECRET);
+  assert.equal(launched[0].env.OTHER_KEY, undefined);
+  assert.ok(w.execs.length > 0 && w.execs.every((e) => e.env.DEEPSEEK_API_KEY === undefined), "no command gets it");
+  const written = readdirSync(attempt(w)).map((f) => readFileSync(join(attempt(w), f), "utf8")).join("\n");
+  assert.ok(!written.includes(SECRET), "the value is in no file");
+  assert.match(written, /--pass-env DEEPSEEK_API_KEY/);
+});
+
+test("--pass-env: without it the Pi host gets the allow-list only", async () => {
+  const w = world({ env: { DEEPSEEK_API_KEY: SECRET } });
+  let seen;
+  w.deps.launchHost = async (host, o) => { seen = o.env; return { code: 0, signal: null }; };
+  w.parts.e1a = () => piStep();
+  await e1a(w);
+  assert.equal(seen.DEEPSEEK_API_KEY, undefined);
+});
+
+test("--pass-env: Claude Code never gets it", async () => {
+  const w = world({ env: { DEEPSEEK_API_KEY: SECRET } });
+  let seen;
+  w.deps.launchHost = async (host, o) => { seen = o.env; return { code: 0, signal: null }; };
+  w.parts.e1a = () => [{ id: "H", human: { host: "claude", say: ["x"], evidence: EVID }, after: [OK] }];
+  await e1a(w, ["--pass-env", "DEEPSEEK_API_KEY"]);
+  assert.equal(seen?.DEEPSEEK_API_KEY, undefined);
+});
+
+for (const [name, env, why] of [
+  ["DEEPSEEK_API_KEY", {}, /DEEPSEEK_API_KEY is not set in this shell/],
+  ["DEEPSEEK_API_KEY", { DEEPSEEK_API_KEY: "" }, /not set in this shell/],
+  ["ANTHROPIC_API_KEY", { ANTHROPIC_API_KEY: "x" }, /not passed to Pi/],
+  ["CLAUDE_CODE_OAUTH_TOKEN", { CLAUDE_CODE_OAUTH_TOKEN: "x" }, /not passed to Pi/],
+  ["CE_SOMETHING", { CE_SOMETHING: "x" }, /not passed to Pi/],
+  ["PATH", {}, /not passed to Pi/],
+  ["lower", { lower: "x" }, /upper-case variable name/],
+]) {
+  test(`--pass-env ${name} is refused with exit 2 and touches nothing (${Object.keys(env).length ? "set" : "unset"})`, async () => {
+    const w = world({ env });
+    w.parts.e1a = () => [];
+    assert.equal(await e1a(w, ["--pass-env", name]), 2);
+    assert.match(w.err.join("\n"), why);
+    assert.equal(existsSync(w.runsDir), false);
+  });
+}
+
 test("folder and file modes: 0700 folders, 0600 files, whatever the umask", async () => {
   const old = process.umask(0o000);
   try {

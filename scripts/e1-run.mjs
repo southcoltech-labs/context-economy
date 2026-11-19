@@ -39,7 +39,7 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PLATFORMS } from "./check-release-proof.mjs";
-import { allowedEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
+import { allowedEnv, passEnv, permissionMode, refuseEnvironment, refuseUpdate } from "./e1-helpers.mjs";
 import { QUESTIONS, askQuestions, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
 import { isEntry } from "./entry.mjs";
 import { hitsReport, overlaps, scrub } from "./e1-scrub.mjs";
@@ -403,7 +403,8 @@ async function humanStep(ctx, step, { guard, fail, setRunning }) {
   setRunning(true);
   let exit;
   try {
-    exit = await deps.launchHost(h.host, { cwd: ctx.cwd, env: ctx.env });
+    // --pass-env variables (a provider key) reach Pi only, never Claude Code or any other command.
+    exit = await deps.launchHost(h.host, { cwd: ctx.cwd, env: h.host === "pi" ? { ...ctx.env, ...ctx.passEnv } : ctx.env });
   } finally {
     setRunning(false);
     deps.ui.restore?.();
@@ -468,8 +469,8 @@ const flag = (argv, name) => {
   return k < 0 ? undefined : argv[k + 1];
 };
 
-const USAGE = `usage: e1-run.mjs e1a --version X --platform ${PLATFORMS.join("|")} [--clone DIR] [--staging owner/repo]
-       e1-run.mjs e1b --part <name> [--a X] [--b X] [--drill <folder>] [--clone DIR] [--staging owner/repo]
+const USAGE = `usage: e1-run.mjs e1a --version X --platform ${PLATFORMS.join("|")} [--clone DIR] [--staging owner/repo] [--pass-env NAME]
+       e1-run.mjs e1b --part <name> [--a X] [--b X] [--drill <folder>] [--clone DIR] [--staging owner/repo] [--pass-env NAME]
        e1-run.mjs prepare --platform ${PLATFORMS.join("|")} [--drill <folder>] [--clone DIR] [--staging owner/repo]`;
 
 /** The installers put `claude` in ~/.local/bin, which a fresh account's PATH may not have yet. */
@@ -487,6 +488,8 @@ export async function main(argv, deps = defaultDeps()) {
   if (command === "scrub") return scrubAttempt(argv, deps);
   const home = env.HOME;
   if (!["e1a", "e1b", "prepare"].includes(command) || !home) { log.error(USAGE); return 2; }
+  const pass = passEnv(argv, env);
+  if (pass.error) { log.error(`e1-run: ${pass.error}`); return 2; }
 
   const vars = {
     command, staging: flag(argv, "staging") ?? "southcoltech-labs/context-economy",
@@ -532,7 +535,7 @@ export async function main(argv, deps = defaultDeps()) {
   const transcript = new Transcript(rawFile);
   const versionFile = command !== "e1a" ? join(folder, "host-versions.json") : join(attemptDir, "host-versions.json");
   const ctx = {
-    deps, vars, cwd: command === "prepare" ? home : vars.clone, env: command === "prepare" ? prepareEnv(allowedEnv(env), home) : allowedEnv(env), transcript, attemptDir, folder, runsDir, steps, proofs: [], step: undefined,
+    deps, vars, cwd: command === "prepare" ? home : vars.clone, env: command === "prepare" ? prepareEnv(allowedEnv(env), home) : allowedEnv(env), transcript, attemptDir, folder, runsDir, steps, proofs: [], step: undefined, passEnv: pass.values,
     assertSpans: [], hostRuns: [], hostResults: {}, interrupts: 0, results: {},
   };
   transcript.append(`# e1-run ${command} ${argv.slice(1).join(" ")}\n# attempt ${n}, started ${deps.now().toISOString()}\n`);
