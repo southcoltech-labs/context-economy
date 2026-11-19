@@ -1,6 +1,6 @@
 # E1a candidate check: runbook
 
-E1a gates every promotion: a candidate tag `v<version>` is installed on each supported platform, from the README alone, against the **staging** repository `southcoltech-labs/context-economy` (named `context-economy-preview` until it was renamed), on both hosts. It proves what ships: tool-gateway, one Claude Code plugin and one Pi extension. The result is `docs/release-proof/<version>.json` on `main`, which `promote.mjs` validates. A transcript goes in `docs/release-proof/<version>.md` as supporting evidence.
+E1a gates every promotion: a candidate tag `v<version>` is installed on each supported platform, from the README alone, against the **staging** repository `southcoltech-labs/context-economy` (named `context-economy-preview` until it was renamed), on both hosts. It proves what ships: every plugin the marketplace lists, and every Pi extension in `package.json`. Today that is tool-gateway, one Claude Code plugin and one Pi extension. The result is `docs/release-proof/<version>.json` on `main`, which `promote.mjs` validates. A transcript goes in `docs/release-proof/<version>.md` as supporting evidence.
 
 Run once on **macOS arm64** and once on **Linux x86_64**, each on a clean machine or a clean user account, with nothing from earlier installs under `~/.claude/` or `~/.pi/`.
 
@@ -22,11 +22,11 @@ E1a installs the candidate tag, not `release`:
 
 ```bash
 claude plugin marketplace add "$STAGING#v$V"
-claude plugin install tool-gateway@context-economy
+claude plugin install tool-gateway@context-economy   # one line per plugin the marketplace lists
 pi install "git:github.com/$STAGING@v$V"
 ```
 
-Restart both hosts.
+Restart both hosts. With several plugins, install every one and confirm each is installed; the install result for a host is `pass` only when all of them are.
 
 ## 3. Use each behaviour
 
@@ -36,6 +36,29 @@ Record each command and its output in the transcript. Do not uninstall yet: step
 | --- | --- | --- |
 | Claude Code | A Bash call such as `git status` | It runs as `'<rtk path>' git status`; a ledger row in `~/.claude/context-economy/gateway-ledger/` has `"rewrite":"applied"`. A permission prompt after the rewrite is recorded, not failed |
 | Pi | A `bash` tool call | Rewritten to the quoted RTK path; a row in `gateway-ledger-pi/` with `"rewrite":"applied"` |
+
+### With more than one plugin (§5a): the whole-run manual fallback
+
+Applies only when the marketplace at `v$V` lists more than one plugin; with tool-gateway alone, the table above is the whole step. It is the fallback for the driver pilot: if the driver stops for a driver fault, the **whole** E1a is run by hand from this runbook, for every plugin. Never run one plugin by hand and another through the driver (no hybrid run).
+
+`install`, `behavior` and `uninstall` are recorded **per host**, not per plugin. Each is an aggregate: `pass` only after **every** plugin's checks for that host and that attestation pass. Give each check its own transcript row, naming the plugin.
+
+| Attestation | Passed only after | When |
+| --- | --- | --- |
+| `install` | Every listed plugin is installed and confirmed (step 2) | Before capture |
+| `behavior` | Every plugin's behaviour check (this step), **and** every required off-switch check below | Before capture, while the plugins are still installed |
+| `uninstall` | Every plugin is removed and the post-uninstall checks of step 5 pass, including data left | After capture, passed to finalize |
+
+Steps 3 and 5 hold these checks:
+
+| Check | Claude Code | Pi | Step |
+| --- | --- | --- | --- |
+| Behaviour, one row per plugin | The plugin's own check, from its SPEC or test plan (tool-gateway: the row above) | The same, on Pi | 3 |
+| Off switch (a plugin that has one) | Start the host with that plugin's switch set (for example `CE_<NAME>=off`): the plugin does nothing, and every **other** plugin's behaviour row still passes | The same | 3 |
+| Uninstall | Remove every plugin and restart. No plugin's feature appears, and no new ledger row | `pi remove` the package and restart. No extension's feature appears | 5 |
+| Data left | Exactly the README list. A plugin that keeps no data adds nothing, which does **not** mean the shared folder is empty | The same | 5 |
+
+Off-switch overrides are **command-scoped**: set the variable on that one launch only, for example `CE_<NAME>=off claude` and `CE_<NAME>=off pi`, never with `export`, and not in any settings or config file. Then check that no off switch is left in effect before the next launch: `env | grep '^CE_'` prints nothing in the shell, and no host settings file sets one. The post-uninstall launches of step 5 must run with every off switch absent, in the same shell set-up as the behaviour checks, or a missing feature proves the switch, not the removal. A persistent off switch never counts as uninstall evidence.
 
 ## 4. Capture (before uninstall)
 
@@ -53,11 +76,11 @@ node scripts/e1a-record.mjs capture --version "$V" --sha "$SHA" --platform macos
 ## 5. Uninstall
 
 ```bash
-claude plugin uninstall tool-gateway@context-economy
+claude plugin uninstall tool-gateway@context-economy   # one line per installed plugin
 pi remove "git:github.com/$STAGING"
 ```
 
-Start each host again. No rewrite happens, and no new ledger rows appear. The data folders left are exactly the ones the README lists.
+Start each host again, with no off switch set (see §5a: `env | grep '^CE_'` prints nothing). No rewrite happens, and no new ledger rows appear. The data folders left are exactly the ones the README lists.
 
 ## 6. Finalize (after uninstall)
 
@@ -77,7 +100,7 @@ Copy each machine's `docs/release-proof/$V-<platform>.json` into one staging che
 
 ```bash
 node scripts/e1a-record.mjs combine --version "$V" --sha "$SHA"
-node scripts/check-release-proof.mjs "$V" "$SHA" tool-gateway --pi tool-gateway
+node scripts/check-release-proof.mjs "$V" "$SHA" tool-gateway --pi tool-gateway   # every listed plugin, then --pi every extension
 ```
 
 - `combine` writes `docs/release-proof/$V.json` from the run files, one run per platform. It reads no host. It refuses a missing platform, a run file for another version, SHA or platform, and a pending capture. `$V.json` is derived: a new capture, finalize or combine for this version removes the earlier one first, so a refused or aborted step never leaves an earlier pass in place.

@@ -93,7 +93,12 @@ jobs:
           cd "$(npm root -g)/@anthropic-ai/claude-code" && node install.cjs
           claude --version
       - run: claude plugin validate . --strict
-      - run: claude plugin test plugins/tool-gateway
+      # Every plugin under plugins/, so a new plugin is tested without editing this file.
+      - name: claude plugin test (every plugin)
+        run: |
+          for plugin in plugins/*/; do
+            claude plugin test "${plugin%/}" || exit 1
+          done
 
   pi:
     name: pi (${{ matrix.os }})

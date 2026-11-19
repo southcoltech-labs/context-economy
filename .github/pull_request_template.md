@@ -8,7 +8,7 @@
       merge commits ([CONTRIBUTING.md](../CONTRIBUTING.md#sign-off)).
 - [ ] A test fails without the change, and the suites in CONTRIBUTING.md pass.
 - [ ] A changeset is added (`npm run changeset`), or this is documentation only.
-- [ ] A change of behaviour updates `plugins/tool-gateway/SPEC.md`.
+- [ ] A change of behaviour updates the plugin's `plugins/<plugin>/SPEC.md`.
 
 ## Reviewer
 
