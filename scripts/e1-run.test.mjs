@@ -1195,6 +1195,43 @@ test("--pass-env: a legacy attempt whose raw header records --pass-env is refuse
   assert.equal(await w2.run(["scrub", "--attempt", d2]), 0);
 });
 
+test("--pass-env: a legacy attempt whose header is missing, unrecognized, truncated or too long to classify is refused", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  const f = join(dir, "scrub-context.json");
+  const c = JSON.parse(readFileSync(f, "utf8")); delete c.passEnvNames; delete c.passEnvVerifiers; writeFileSync(f, JSON.stringify(c));
+  const rawFile = join(dir, "0.1.3-macos-arm64.raw.txt");
+  const raw = readFileSync(rawFile, "utf8");
+  const body = raw.slice(raw.indexOf("\n", raw.indexOf("\n") + 1) + 1);
+  const cases = {
+    "missing header": body,
+    "unrecognized header": `# something else\n# attempt 1, started x\n${body}`,
+    "header not first": `\n${raw}`,
+    "truncated (no attempt line)": `# e1-run e1a\n${body}`,
+    "long header, option far beyond 4 KB": `# e1-run e1a ${"--x ".repeat(2000)}--pass-env DEEPSEEK_API_KEY\n# attempt 1, started x\n${body}`,
+  };
+  for (const [label, text] of Object.entries(cases)) {
+    writeFileSync(rawFile, text);
+    rmSync(clean, { force: true });
+    w.err.length = 0; w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+    assert.equal(await w.run(["scrub", "--attempt", dir]), 2, label);
+    assert.equal(existsSync(clean), false, label);
+  }
+  // a complete, recognized credential-free header still rebuilds
+  writeFileSync(rawFile, `# e1-run e1a --drill x\n# attempt 1, started 2026-01-01T00:00:00.000Z\n${body}`);
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 0);
+});
+
+test("--pass-env: verifier strings must be strings, not arrays", async () => {
+  const { w, dir, clean } = await reflectingRun();
+  rmSync(clean);
+  const f = join(dir, "scrub-context.json");
+  const c = JSON.parse(readFileSync(f, "utf8")); const v = c.passEnvVerifiers.DEEPSEEK_API_KEY;
+  c.passEnvVerifiers.DEEPSEEK_API_KEY = { salt: [v.salt], sha256: [v.sha256] }; writeFileSync(f, JSON.stringify(c));
+  w.deps.env.DEEPSEEK_API_KEY = REFLECT;
+  assert.equal(await w.run(["scrub", "--attempt", dir]), 2);
+  assert.match(w.err.join("\n"), /lacks a valid verifier/);
+});
+
 test("--pass-env: the re-supplied key is not inherited by the rebuild's scrubber (real subprocess)", async () => {
   const home = tmp("e1-home-"); const bin = tmp("e1-bin-"); const mark = join(home, "gitleaks-saw");
   const realGitleaks = execFileSync("sh", ["-c", "command -v gitleaks"], { encoding: "utf8" }).trim();

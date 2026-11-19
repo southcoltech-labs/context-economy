@@ -620,16 +620,23 @@ function scrubAttempt(argv, deps) {
   // redaction needs the values again. Without them the shareable copy cannot be made safely: fail closed.
   if (c.passEnvNames !== undefined && (!Array.isArray(c.passEnvNames) || !c.passEnvNames.every((n) => typeof n === "string"))) { log.error("e1-run: scrub-context.json holds a bad passEnvNames"); return 2; }
   const need = c.passEnvNames ?? [];
-  // A legacy context (no names) is "no credentials" only when the raw header does not record --pass-env.
-  if (c.passEnvNames === undefined && /^# e1-run .*--pass-env/m.test(readFileSync(rawFile, "utf8").slice(0, 4096))) { log.error("e1-run: this attempt was run with --pass-env, but its scrub-context.json has no credential metadata (an older driver), so a scrubbed copy cannot be rebuilt safely. No scrubbed copy written."); return 2; }
+  // A context without credential names is accepted only when the COMPLETE first driver header line (anchored at the start,
+  // followed by the "# attempt" line) is recognized and carries no credential option. Anything else cannot be classified: refuse.
+  let rawText;
+  try { rawText = readFileSync(rawFile, "utf8"); } catch (e) { log.error(`e1-run: ${rawFile} cannot be read (${e.message})`); return 2; }
+  if (c.passEnvNames === undefined) {
+    const head = /^(# e1-run [a-z0-9]+(?: [^\n]*)?)\n# attempt \d+, started [^\n]*\n/.exec(rawText);
+    if (!head) { log.error("e1-run: this attempt's scrub-context.json has no credential metadata and its raw header is not recognized, so it cannot be shown to be free of --pass-env credentials. No scrubbed copy written."); return 2; }
+    if (/pass-env/.test(head[1])) { log.error("e1-run: this attempt was run with --pass-env, but its scrub-context.json has no credential metadata (an older driver), so a scrubbed copy cannot be rebuilt safely. No scrubbed copy written."); return 2; }
+  }
   const again = passEnv(need.flatMap((n) => ["--pass-env", n]), deps.env);
   if (again.error) { log.error(`e1-run: the run that made this attempt held ${need.join(", ")} (--pass-env), and the scrubbed copy must remove its value. ${again.error.replace(/^--pass-env /, "")}. No scrubbed copy written.`); return 2; }
   const ver = c.passEnvVerifiers;
-  if (need.length && (!ver || typeof ver !== "object" || Array.isArray(ver) || !need.every((n) => ver[n] && /^[0-9a-f]{32}$/.test(ver[n].salt) && /^[0-9a-f]{64}$/.test(ver[n].sha256)))) { log.error("e1-run: scrub-context.json lacks a valid verifier for each credential, so the original values cannot be confirmed. No scrubbed copy written."); return 2; }
+  if (need.length && (!ver || typeof ver !== "object" || Array.isArray(ver) || !need.every((n) => ver[n] && typeof ver[n].salt === "string" && typeof ver[n].sha256 === "string" && /^[0-9a-f]{32}$/.test(ver[n].salt) && /^[0-9a-f]{64}$/.test(ver[n].sha256)))) { log.error("e1-run: scrub-context.json lacks a valid verifier for each credential, so the original values cannot be confirmed. No scrubbed copy written."); return 2; }
   const wrong = need.filter((n) => verifier(again.values[n], ver[n].salt).sha256 !== ver[n].sha256);
   if (wrong.length) { log.error(`e1-run: the value now in ${wrong.join(", ")} is not the one the run used (rotated or mistyped), so it cannot be removed from the transcript. Export the original value. No scrubbed copy written.`); return 2; }
   for (const n of need) delete deps.env[n]; // as in a run: the scrubber's children never inherit it
-  const r = scrubToFile(deps, { raw: readFileSync(rawFile, "utf8"), outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt, secrets: again.values });
+  const r = scrubToFile(deps, { raw: rawText, outFile, config, spans: c.assertSpans ?? [], label: c.label, home: c.home, hostname: c.hostname, realHome: c.realHome, tmpDir: attempt, secrets: again.values });
   if (!r.ok) { log.error(`e1-run: NO scrubbed copy written: ${r.reason}. The raw transcript stays private in ${attempt}.`); return 3; }
   log.log(`e1-run: send ${r.file} (the scrubbed copy, ${r.hits} hits listed at its end). The raw transcript and scrub-context.json stay private in ${attempt}.`);
   for (const note of r.notes) log.error(`e1-run: ${note}`);
