@@ -1,6 +1,6 @@
 # E1b release drill: runbook
 
-E1b proves the release policy (install and update from `release`, roll back only to `promoted-v<version>`) for tool-gateway. It proves the update and rollback loop on both hosts, in the **staging** repository `southcoltech-labs/context-economy-preview`. It runs once before the public preview, and again whenever the release workflow or the promotion mechanism changes, and before 1.0.
+E1b proves the release policy (install and update from `release`, roll back only to `promoted-v<version>`) for tool-gateway. It proves the update and rollback loop on both hosts, in the **staging** repository `southcoltech-labs/context-economy` (named `context-economy-preview` until it was renamed). It runs once before the public preview, and again whenever the release workflow or the promotion mechanism changes, and before 1.0.
 
 The record is `docs/release-proof/e1b-<date>.md`: host versions, platform, each command with its output, the installed commits, every override check's output, and the data checks.
 
@@ -19,7 +19,7 @@ The record is `docs/release-proof/e1b-<date>.md`: host versions, platform, each 
 - B's E1a (step 3) runs on **separate** clean accounts, never the E1b account: E1a installs and uninstalls the candidate, which would disturb the drill's baseline.
 
 ```bash
-STAGING=southcoltech-labs/context-economy-preview
+STAGING=southcoltech-labs/context-economy
 A=<version A>    SHA_A=<git rev-parse "promoted-v$A^{commit}">
 ```
 
