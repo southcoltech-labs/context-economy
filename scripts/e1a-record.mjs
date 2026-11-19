@@ -39,7 +39,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { isEntry } from "./entry.mjs";
 import { PLATFORMS, piExtensionNames, proofPath, STEPS } from "./check-release-proof.mjs";
 import { makeRunner, SHA40 } from "./release-lib.mjs";
 import { promotedManifests } from "./sync-plugin-version.mjs";
@@ -275,4 +275,4 @@ export function main(argv, { env = process.env, root = process.cwd(), run = make
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+if (isEntry(import.meta.url)) process.exitCode = main(process.argv.slice(2));

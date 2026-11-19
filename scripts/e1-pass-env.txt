@@ -1,0 +1,35 @@
+# The variables `--pass-env` may hand to the Pi host step: provider credentials, one variable each, taken from
+# the "Environment Variables" list of `pi --help` (Pi 1.5.2). Read by scripts/e1-helpers.mjs and scripts/e1-test-run.sh,
+# one name per line. Not on it, on purpose: ANTHROPIC_* (Claude Code), runtime and shell controls (NODE_OPTIONS,
+# LD_PRELOAD, BASH_ENV), proxies, Pi's own settings (PI_*), cloud settings that are not secrets (AWS_REGION,
+# AZURE_*_BASE_URL, CLOUDFLARE_ACCOUNT_ID) and credentials of several parts (AWS key pair). Add a name only after review.
+ANT_LING_API_KEY
+OPENAI_API_KEY
+AZURE_OPENAI_API_KEY
+DEEPSEEK_API_KEY
+NVIDIA_API_KEY
+GEMINI_API_KEY
+GROQ_API_KEY
+CEREBRAS_API_KEY
+XAI_API_KEY
+FIREWORKS_API_KEY
+TOGETHER_API_KEY
+BASETEN_API_KEY
+OPENROUTER_API_KEY
+AI_GATEWAY_API_KEY
+ZAI_API_KEY
+ZAI_CODING_CN_API_KEY
+MISTRAL_API_KEY
+MINIMAX_API_KEY
+MOONSHOT_API_KEY
+OPENCODE_API_KEY
+KIMI_API_KEY
+META_API_KEY
+CLOUDFLARE_API_KEY
+QWEN_TOKEN_PLAN_API_KEY
+QWEN_TOKEN_PLAN_CN_API_KEY
+XIAOMI_API_KEY
+XIAOMI_TOKEN_PLAN_CN_API_KEY
+XIAOMI_TOKEN_PLAN_AMS_API_KEY
+XIAOMI_TOKEN_PLAN_SGP_API_KEY
+AWS_BEARER_TOKEN_BEDROCK
