@@ -84,7 +84,7 @@ Expected for each: `can_admins_bypass: false`; `protection_rules` with `branch_p
 
 ## 4. Protect `main`
 
-Add a ruleset for `main`, with **no bypass actors**:
+Add a ruleset for `main`, with **one bypass actor: the organization owner role, for pull requests only** (bypass mode "pull request", not "always"; no App and no one else):
 - Require a pull request before merging, with at least 1 approval; dismiss stale approvals when new commits are pushed; require review from Code Owners; require approval of the most recent reviewable push. Allowed merge methods: squash and rebase.
 - Require linear history.
 - Require these 5 status checks from GitHub Actions, with the branch up to date. The names must match exactly, as `promote.yml` checks them too:
@@ -99,6 +99,8 @@ Add a ruleset for `main`, with **no bypass actors**:
 
 - Also require the `DCO` check, with the DCO App as its source. Install the App from **github.com/apps/dco → Only select repositories →** this repository, and add no `.github/dco.yml`: its default requires sign-off from organization members too. The check appears only after the App has reported on a first pull request; add it then. `promote.yml` doesn't list it: it is a pull-request check, and `repo checks` enforces the same sign-off rule.
 - Block force pushes. Restrict deletions.
+
+The bypass applies to the whole ruleset, so an owner who uses it on a pull request skips the approval rules and the required status checks for that merge; it does not allow a direct push. GitHub records each bypass. Everyone else, and every App, has no bypass.
 
 The candidate App's version PR goes through the same checks as any pull request. One maintainer approves it, as `docs/REVIEWING.md` "The version pull request" describes: the bot pushed last, so the most-recent-push rule is met.
 
@@ -132,7 +134,7 @@ Read every ruleset back, `main`'s included, before going on:
 for id in $(gh api repos/$R/rulesets --jq '.[].id'); do gh api repos/$R/rulesets/$id --jq '{name, target, enforcement, conditions, rules: [.rules[].type], bypass_actors}'; done
 ```
 
-Expected: the `main` ruleset of step 4 and the five rulesets of the table above, each `active`, with exactly the bypass actors listed.
+Expected: the `main` ruleset of step 4 and the five rulesets of the table above, each `active`, with exactly the bypass actors listed. The `main` ruleset lists one: `OrganizationAdmin` with `bypass_mode` `pull_request`.
 
 ## 6. Keys, last
 

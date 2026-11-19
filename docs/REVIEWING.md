@@ -1,6 +1,6 @@
 # Reviewing a pull request
 
-Every pull request needs an approving review before it merges. The reviewer goes through
+Every pull request needs an approving review before it merges, except that an organization owner can bypass the `main` ruleset on a pull request (see "Protections outside the repository"). The reviewer goes through
 [All pull requests](#all-pull-requests), then each section for the paths it changes. CI's
 `repo checks` job writes the list of sections that apply into the run's summary ("Review scope"),
 with any test files the pull request deletes.
@@ -132,7 +132,10 @@ approving its own change to a check, a workflow or this file:
   owner. GitHub reads the file from the base branch, so a pull request cannot remove its own
   owners.
 - The `main` ruleset requires review from code owners, dismisses approvals when new commits are
-  pushed, and requires the last push to be approved by someone other than its author.
+  pushed, and requires the last push to be approved by someone other than its author. Its one
+  bypass actor is the organization owner role, for pull requests only. A bypass skips the whole
+  ruleset for that merge, the approval and the required checks included, so the guarantee above
+  holds for everyone except an owner who uses it.
 - Actions require approval before running workflows from outside contributors.
 - Two environments, each limited to deployment branch `main`, with no admin bypass. `candidate`
   holds only the candidate App's key and needs a maintainer's approval, which may be the one who
