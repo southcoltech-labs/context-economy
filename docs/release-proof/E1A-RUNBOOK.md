@@ -1,13 +1,13 @@
 # E1a candidate check: runbook
 
-E1a gates every promotion: a candidate tag `v<version>` is installed on each supported platform, from the README alone, against the **staging** repository `southcoltech-labs/context-economy-preview`, on both hosts. It proves what ships: tool-gateway, one Claude Code plugin and one Pi extension. The result is `docs/release-proof/<version>.json` on `main`, which `promote.mjs` validates. A transcript goes in `docs/release-proof/<version>.md` as supporting evidence.
+E1a gates every promotion: a candidate tag `v<version>` is installed on each supported platform, from the README alone, against the **staging** repository `southcoltech-labs/context-economy` (named `context-economy-preview` until it was renamed), on both hosts. It proves what ships: tool-gateway, one Claude Code plugin and one Pi extension. The result is `docs/release-proof/<version>.json` on `main`, which `promote.mjs` validates. A transcript goes in `docs/release-proof/<version>.md` as supporting evidence.
 
 Run once on **macOS arm64** and once on **Linux x86_64**, each on a clean machine or a clean user account, with nothing from earlier installs under `~/.claude/` or `~/.pi/`.
 
 ## Inputs
 
 ```bash
-STAGING=southcoltech-labs/context-economy-preview   # the staging repository
+STAGING=southcoltech-labs/context-economy   # the staging repository
 V=<version>                      # the candidate, e.g. 0.1.0
 SHA=<40-hex commit of v$V>       # git rev-parse "v$V^{commit}" in a staging clone
 ```
