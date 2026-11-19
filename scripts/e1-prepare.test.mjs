@@ -466,7 +466,7 @@ test("e1-test-run.sh: bootstrap, prepare, baseline, then only the scrubbed files
   assert.equal(t.r.status, 0, t.r.stdout + t.r.stderr);
   assert.deepEqual(t.calls, ["prepare --platform", "e1b --part"]);
   assert.deepEqual(t.files, ["attempt-1-prepare-2026-11-17.txt", "attempt-2-e1b-2026-11-17.txt", "e1-end.txt", "e1-start.txt"]);
-  assert.match(readFileSync(join(t.send, "e1-start.txt"), "utf8"), /^\d{4}-\d\d-\d\dT[\d:]+Z\ndriver commit: /);
+  assert.match(readFileSync(join(t.send, "e1-start.txt"), "utf8"), /^\d{4}-\d\d-\d\dT[\d:]+Z\ndriver commit: /);  assert.match(readFileSync(join(t.send, "e1-end.txt"), "utf8"), /^\d{4}-\d\d-\d\dT[\d:]+Z\nexit status: 0\n$/);
 });
 
 test("e1-test-run.sh: a failed prepare stops the chain, still collects, and exits with the driver's status", { skip: !RUN_LABEL }, () => {
@@ -474,9 +474,11 @@ test("e1-test-run.sh: a failed prepare stops the chain, still collects, and exit
   assert.equal(t.r.status, 3, t.r.stdout + t.r.stderr);
   assert.deepEqual(t.calls, ["prepare --platform"], "no baseline after a failed prepare");
   assert.deepEqual(t.files, ["attempt-1-prepare-2026-11-17.txt", "e1-end.txt", "e1-start.txt"]);
+  assert.match(readFileSync(join(t.send, "e1-end.txt"), "utf8"), /\nexit status: 3\n$/);
   const base = testRun({ baselineRc: 1 });
   assert.equal(base.r.status, 1);
   assert.ok(base.files.includes("attempt-2-e1b-2026-11-17.txt"));
+  assert.match(readFileSync(join(base.send, "e1-end.txt"), "utf8"), /\nexit status: 1\n$/);
 });
 
 test("e1-test-run.sh: the wrong label is refused before anything runs", () => {

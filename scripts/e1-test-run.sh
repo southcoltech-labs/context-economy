@@ -20,8 +20,8 @@
 #
 # The operator still answers the pauses (the sign-ins at P.3, the two host sessions in the baseline).
 # A failed step stops the chain; the files are collected anyway. What is copied: the scrubbed transcripts
-# and the two bootstrap files (e1-start.txt, e1-end.txt: output of the bootstrap and two times, which hold
-# the account name and paths only). Never the raw transcripts or scrub-context.json.
+# and the two bootstrap files (e1-start.txt, e1-end.txt: output of the bootstrap, two times and the run's exit
+# status, which hold the account name and paths only). Never the raw transcripts or scrub-context.json.
 set -u
 
 # The credentials named with --pass-env must not reach any helper process (grep, dirname, uname, id, the bootstrap,
@@ -92,7 +92,7 @@ if [ "$rc" = 0 ]; then
 fi
 
 # 3. Collect, whatever happened.
-date -u +%FT%TZ > "$END"
+{ date -u +%FT%TZ; echo "exit status: $rc"; } > "$END"
 mkdir -p "$SEND" && cp "$START" "$END" "$SEND/" || echo "e1-test-run: could not write to $SEND" >&2
 if [ -d "$HOME/e1-runs/$DRILL" ]; then
   find "$HOME/e1-runs/$DRILL" -name '*.txt' ! -name '*.raw.txt' | while IFS= read -r f; do
