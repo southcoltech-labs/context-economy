@@ -33,6 +33,7 @@ export const shownCommand = (command: string): string | undefined => {
   while (at < words.length && ASSIGNMENT.test(words[at]!)) at += 1
   const word = words[at]
   if (word === undefined || word === '') return undefined
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(word)) return undefined // a URL (https://…/git) or any scheme: never a command name
   const name = word.slice(word.lastIndexOf('/') + 1)
   return NAME_SHAPE.test(name) && SHOWN_COMMANDS.has(name) ? name : undefined
 }
@@ -56,15 +57,14 @@ export const topItems = (items: readonly MessageItem[], n: number): TopRow[] => 
     index,
   })).filter(({ row }) => row.tokens > 0)
   rows.sort((a, b) => b.row.tokens - a.row.tokens || a.index - b.index)
-  const selected = rows.slice(0, n)
-  const cutoff = selected.at(-1)?.row.tokens
-  return rows.slice(0, cutoff === undefined ? n : rows.findIndex(({ row }) => row.tokens === cutoff) + rows.filter(({ row }) => row.tokens === cutoff).length).map(({ row }) => row)
+  return rows.slice(0, n).map(({ row }) => row) // exactly n rows; equal sizes keep the order they have in the transcript
 }
 
-export const topLines = (rows: readonly TopRow[]): string[] => {
-  if (rows.length === 0) return ['top items: none yet']
+/** `omitted` is how many older messages were left out (the walk limit): the list then says so. */
+export const topLines = (rows: readonly TopRow[], omitted = 0): string[] => {
+  if (rows.length === 0) return [omitted > 0 ? `top items: none in the latest messages (${omitted} older not read)` : 'top items: none yet']
   return [
-    'top items (≈ tokens)',
+    omitted > 0 ? `top items (≈ tokens, latest messages only: ${omitted} older not read)` : 'top items (≈ tokens)',
     ...rows.map(row => `${formatTokens(row.tokens).padStart(6)}  ${CATEGORY_STYLES[row.kind as CategoryKey].label.padEnd(11)}  ${row.label}`),
   ]
 }

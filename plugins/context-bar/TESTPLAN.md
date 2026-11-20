@@ -31,12 +31,13 @@ The unit tests do not draw the band in a real terminal. For each host, in a real
 
 | Check | Expect |
 | --- | --- |
-| Install, start a session, send a prompt | the band shows above the prompt with a bar, legend and header |
+| Claude Code: install, start a session, type `/context-bar`, send a prompt | the band shows above the prompt with a bar, legend and header (it starts hidden) |
+| Pi: install, start a session, send a prompt | the band shows above the prompt (it is shown from the start) |
 | `/context-bar min`, `norm`, `max` | the legend detail changes |
 | `/context-bar top` | rows show a tool name and at most one command name, never arguments |
 | `/context-bar r` | refreshes |
-| Start with `CE_CONTEXT_BAR=off` | no band, no command effect |
-| Uninstall, start again with the switch unset | no band, and no data folder left |
+| Start with `CE_CONTEXT_BAR=off` set for that launch only (not exported, not in settings), type `/context-bar` | no band |
+| Uninstall, start again with the switch unset in the shell and in the host's settings, type `/context-bar` | no band, and no context-bar data (it writes none; tool-gateway's config and ledgers, if installed, stay in their folder) |
 
 For Claude Code, open the trend with `▼` and check the line moves while idle.
 

@@ -951,3 +951,42 @@ test('a value other than the exact off leaves the plugin working', async ($, on)
   const result = await $.command.run(RUN)
   expect(result.text).toBe('Context band on.')
 })
+
+// ---- malformed and over-long transcripts: commands and events complete ----
+
+const MALFORMED = [null, 7, 'x', [], { role: 'user' }, { role: 'assistant', toolUses: [null, { tool: 5 }], toolResults: 'x' }, { role: 'tool', toolUses: [{ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'z' }] }, { role: 'user', text: 'fine' }]
+
+test('/context-bar top completes on a malformed transcript and lists the well-formed part', async ($, on) => {
+  mocked(on, undefined, MALFORMED)
+  const r = await $.command.run(TOP_ARGS)
+  expect(r.text).toContain('user text')
+})
+
+test('/context-bar top completes when the transcript itself is not a list', async ($, on) => {
+  mocked(on, undefined, { not: 'a list' })
+  const r = await $.command.run(TOP_ARGS)
+  expect(r.text).toBe('top items: none yet')
+})
+
+test('/context-bar top returns a bounded message when reading the transcript fails', async ($, on) => {
+  on('session.messages', () => { throw new Error('x'.repeat(500)) })
+  const r = await $.command.run(TOP_ARGS)
+  expect((r.text as string).startsWith('context-bar: cannot list the top items')).toBe(true)
+  expect((r.text as string).length).toBeLessThan(200)
+})
+
+test('/context-bar top on a transcript over the walk limit lists five rows and says older messages were not read', async ($, on) => {
+  const many = Array.from({ length: 20_003 }, () => ({ role: 'user', text: 'same size text' }))
+  mocked(on, undefined, many)
+  const r = await $.command.run(TOP_ARGS)
+  const lines = (r.text as string).split('\n')
+  expect(lines).toHaveLength(6)
+  expect(lines[0]).toContain('3 older not read')
+})
+
+test('a refresh completes on a malformed transcript and shows the band', async ($, on) => {
+  mocked(on, undefined, MALFORMED)
+  await $.command.run(RUN) // show the band
+  const r = await $.command.run({ ...RUN, args: 'r' })
+  expect(r.text).toBe('Context band refreshed.')
+})

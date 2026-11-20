@@ -185,3 +185,16 @@ test('a command over 1 MiB is never inspected: it is sized by length and counts 
   expect(result.command).toBeUndefined()
   expect(classify(result)).toBe('toolOut')
 })
+
+test('malformed containers and elements add only what is well formed and never throw', () => {
+  const bad = [null, undefined, 5, 'x', [], {}, { role: 'user', text: 'ok' }, { role: 'assistant', toolUses: [null, 3, { tool: 'Bash', input: 'x', tool_use_id: 1 }], toolResults: [null, 'r', { text: 5 }] }, { role: 'user', toolUses: 'x', toolResults: { a: 1 } }]
+  const items = toItems(bad as never)
+  expect(items.filter(i => i.kind === 'text')).toEqual([{ kind: 'text', chars: 2, role: 'user' }])
+  expect(() => toItems(null as never)).not.toThrow()
+  expect(() => toItems({ length: 3 } as never)).not.toThrow()
+})
+
+test('a message with an unknown role adds nothing, its tool fields included', () => {
+  const items = toItems([{ role: 'tool', text: 'x', toolUses: [{ tool: 'Bash', input: { command: 'ls' }, tool_use_id: 'a' }], toolResults: [{ tool_use_id: 'a', text: 'out' }] }] as never)
+  expect(items).toEqual([])
+})

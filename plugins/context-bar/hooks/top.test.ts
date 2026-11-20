@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 import { shownCommand, topItems, topLines } from './top'
+import { latest, MAX_MESSAGES_WALKED } from './walk'
 import type { MessageItem } from './split'
 
 const read = (chars: number, target: string): MessageItem => ({ kind: 'result', chars, tool: 'Read', target })
@@ -29,7 +30,7 @@ describe('topItems', () => {
       { kind: 'call', chars: 25 },
       { kind: 'result', chars: 20, tool: 'Grep', target: 'TODO' },
       { kind: 'result', chars: 20 },
-    ], 5)
+    ], 6)
     expect(rows.map(r => r.label)).toEqual(['user text', 'reply text', 'Grep call', 'tool call', 'Grep TODO', 'tool'])
   })
 
@@ -124,5 +125,25 @@ describe('shownCommand (what /context-bar top may show of a Bash command)', () =
   test('a top row for such commands says only Bash', () => {
     const rows = topItems([bash(100, 'TOKEN=abc ./run.sh https://x/y'), bash(90, 'git push origin main')], 2)
     expect(rows.map(r => r.label)).toEqual(['Bash', 'Bash git'])
+  })
+})
+
+describe('top is bounded', () => {
+  test('a large set of equal sizes still returns exactly n rows, in transcript order', () => {
+    const items: MessageItem[] = Array.from({ length: 20_001 }, () => ({ kind: 'text', role: 'user', chars: 40 }))
+    expect(topItems(items, 5)).toHaveLength(5)
+  })
+  test('only the latest messages are read, and the list says how many older ones were not', () => {
+    const { recent, omitted } = latest(Array.from({ length: MAX_MESSAGES_WALKED + 3 }, () => 0))
+    expect(recent).toHaveLength(MAX_MESSAGES_WALKED)
+    expect(omitted).toBe(3)
+    expect(topLines([{ kind: 'prompt', label: 'user text', tokens: 5 }], 3)[0]).toContain('3 older not read')
+    expect(topLines([], 3)[0]).toContain('3 older not read')
+    expect(topLines([], 0)).toEqual(['top items: none yet'])
+  })
+  test('a URL is never a command name, even when it ends in a listed name', () => {
+    expect(shownCommand('https://example.test/git TOKEN')).toBeUndefined()
+    expect(shownCommand('ssh://host/npm')).toBeUndefined()
+    expect(shownCommand('file:///usr/bin/git')).toBeUndefined()
   })
 })

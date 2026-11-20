@@ -10,6 +10,7 @@ Claude Code plugin and the Pi extension (`extensions/context-bar`).
 - It is display only. It never changes a prompt, a tool call, a message or a setting.
 - It writes nothing and logs nothing. Its figures live in memory for the session and are gone when it ends. The only file it
   reads is the optional Pi config (below).
+- On Claude Code the band starts hidden: `/context-bar` shows it. On Pi it is shown from the start and `/context-bar` hides it.
 
 ## Hosts
 
@@ -58,18 +59,44 @@ These bound the work and the memory the plugin may use, however long the session
 
 | Limit | Value |
 | --- | --- |
-| Refresh work | only the messages added since the last refresh are split; a full split happens after the first read, a compaction, a shorter transcript or `/context-bar r` |
+| Refresh work | only the messages added since the last refresh are split (see Cache validity); a full split happens after the first read, a compaction, a new session, a shorter transcript, `/context-bar r`, or when a message already read has changed |
 | Refresh time | at most 25 ms at the 95th percentile for a refresh that adds a turn to a 5,000-message session (measured in the tests; the figure is a budget, not a promise for every machine) |
-| Messages walked in one full split | the latest 20,000; older ones are not read and the band marks the estimate with `≈` |
-| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length |
+| Messages walked in one full split | the latest 20,000; older ones are not read and the band marks the estimate with `≈`. Over this limit every refresh splits the whole retained window again; the "only new messages" rule does not apply there |
+| `/context-bar top` | reads the latest 20,000 messages, lists exactly 5 rows (equal sizes keep transcript order) and says how many older messages were not read |
+| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length. The size of a tool call's arguments is found by a bounded count (stops past 1 MiB, 100,000 values or 64 levels of nesting), never by building the whole text |
 | Trend history | at most 120 points per series, in memory only |
+
+## Cache validity
+
+A refresh keeps, for each message already read, a small signature made from sizes (role, text length, how many calls and
+results, their text lengths). It adds only the new messages when every earlier signature is unchanged and the transcript did not
+get shorter. An edited message, a late result attached to an earlier message, a replaced branch of the same length and a
+compaction all change a signature or the length, so the transcript is split afresh. A change that keeps every size the same is
+not seen, and does not change the split, which is made from sizes.
+
+## What is kept in memory
+
+Between refreshes it keeps: per-message signatures (numbers), the sums per row, the trend points (timestamps and token counts),
+and, to pair a result with its call, the tool-call id, the tool name and whether the command was only read commands. A call is
+dropped once its result has been read. It does not keep command text, paths, search patterns, message text or result text
+between refreshes. `/context-bar top` needs labels, so it converts the transcript for that one command, keeps the text only
+while building the list, and drops it.
+
+## Proportions
+
+The split of the messages row describes the messages that were read: the latest 20,000 at most, and only messages with a
+role the plugin knows. Its proportions may differ from the full history's. The total is always the host's, unchanged, and the
+band marks the estimate (`≈`, or `distribution est.`).
 
 ## Malformed input
 
 Nothing the host passes in may throw into the host.
 
-- A message with an unknown or missing role adds nothing to the split.
-- A message, tool call or result with missing or wrongly typed fields adds only what is well formed.
+- A message that is not an object, or whose role is not one the plugin knows, adds nothing to the split, its tool fields included.
+- A tool call, result or content block with missing or wrongly typed fields adds only what is well formed. A missing argument
+  sizes as nothing.
+- Every command path, including `/context-bar top`, ends in a message and never an exception: a transcript that cannot be read
+  shows a short, bounded `context-bar: cannot list the top items (...)` or `n/a (...)`.
 - A bad option or config file is shown in the band (see Configuration).
 - Any other failure while measuring is shown as `n/a (<reason>)` in the band, and the session continues.
 
@@ -88,12 +115,12 @@ The list is printed to you in the session. It is never stored or sent anywhere. 
 ## Privacy
 
 The plugin sees the transcript, so what it does with it is limited on purpose: it counts characters and classifies messages,
-keeps only numbers (sums, token counts, timestamps for the trend) and the text it draws, and does not write, log or transmit
-anything. The one place text from the transcript can appear is `/context-bar top`, under the rule above.
+keeps between refreshes only numbers and short pairing metadata (see What is kept in memory), and does not write, log or
+transmit anything. The one place text from the transcript can appear is `/context-bar top`, under the rule above.
 
 ## Acceptance
 
 - Both hosts: the band shows the bar, legend and header from the host's numbers; the rows add up to the host's total.
 - `CE_CONTEXT_BAR=off` shows nothing on either host.
-- Uninstalling removes the band; nothing is left behind, because nothing was written.
+- Uninstalling removes the band; context-bar leaves nothing behind, because it wrote nothing. (tool-gateway's config and ledgers, if installed, stay in their own folder.)
 - The limits and the malformed-input rules above hold, each with an automated test.

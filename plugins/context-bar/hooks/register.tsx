@@ -22,9 +22,9 @@ import {
   TOP_DEFAULT_COUNT,
 } from './config'
 import { buildView } from './view'
-import { convertClaude, toItems } from './items'
+import { claudeAdapter, toItems } from './items'
 import type { ItemState } from './items'
-import { walkMessages } from './walk'
+import { latest, walkMessages } from './walk'
 import type { Walk } from './walk'
 import { topItems, topLines } from './top'
 import { EMPTY_COMPACTIONS, compactionText, recordCompaction } from './compaction'
@@ -89,7 +89,7 @@ const refresh = async ($: EngineInterface, growthPercent: () => number, level: (
     const stats = await read($, compactions)
     const recorded = stats as CompactionStats
     const text = recorded.count > 0 ? compactionText(recorded, await $.clock.now()) : ''
-    walk = walkMessages(walk, messages, convertClaude)
+    walk = walkMessages(walk, messages, claudeAdapter)
     next = { ...buildView(breakdown, { raw: walk.raw, approximate: walk.omitted > 0 }), compactionText: text }
   } catch (cause) {
     failure = cause instanceof Error ? cause.message : String(cause)
@@ -158,8 +158,12 @@ export const register: Register = (on, options) => {
     if (await isOff($)) return { text: TEXT_SWITCHED_OFF }
     const arg = e.args.trim()
     if (arg === TOP_ARG) {
-      const messages = await $.session.messages()
-      return { text: topLines(topItems(toItems(messages), TOP_DEFAULT_COUNT)).join('\n') }
+      try {
+        const { recent, omitted } = latest(await $.session.messages())
+        return { text: topLines(topItems(toItems(recent), TOP_DEFAULT_COUNT), omitted).join('\n') }
+      } catch (cause) {
+        return { text: `context-bar: cannot list the top items (${cause instanceof Error ? cause.message.slice(0, 120) : 'unknown error'})` }
+      }
     }
     if (arg === REFRESH_ARG) {
       await update($, isEnabled, () => true)

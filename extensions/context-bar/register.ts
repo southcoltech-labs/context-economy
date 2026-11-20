@@ -16,9 +16,9 @@ import { barPalette } from './config'
 import type { BarConfig } from './config'
 import { PALETTES, UNKNOWN_HOST_THEME } from '../../plugins/context-bar/hooks/palettes'
 import type { Palette } from '../../plugins/context-bar/hooks/palettes'
-import { convertPi, piItems } from './items'
+import { piAdapter, piItems } from './items'
 import type { PiItemState } from './items'
-import { walkMessages } from '../../plugins/context-bar/hooks/walk'
+import { latest, walkMessages } from '../../plugins/context-bar/hooks/walk'
 import type { Walk } from '../../plugins/context-bar/hooks/walk'
 import { splitFromRaw } from '../../plugins/context-bar/hooks/split'
 import { topItems, topLines } from '../../plugins/context-bar/hooks/top'
@@ -76,7 +76,7 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
     const compaction = { ...deps.compaction(ctx.model), ...(offloadAt === undefined ? {} : { offloadAtTokens: offloadAt }) }
     const base = buildPiView(usage, fixed, compaction)
     if (base === null) return void (view = null)
-    walk = walkMessages(walk, deps.messages(ctx), convertPi)
+    walk = walkMessages(walk, deps.messages(ctx), piAdapter)
     const split = splitFromRaw(walk.raw, base.rows.find(r => r.key === 'messages')?.tokens ?? 0)
     view = { ...base, rows: applySplit(base.rows, split, base.windowTokens) }
   }
@@ -139,7 +139,10 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
     handler: (args, ctx) => {
       const arg = args.trim()
       if (arg === TOP_ARG) {
-        try { return ctx.ui.notify(topLines(topItems(piItems(deps.messages(ctx)), TOP_DEFAULT_COUNT)).join('\n'), 'info') }
+        try {
+          const { recent, omitted } = latest(deps.messages(ctx))
+          return ctx.ui.notify(topLines(topItems(piItems(recent), TOP_DEFAULT_COUNT), omitted).join('\n'), 'info')
+        }
         catch (cause) { return ctx.ui.notify(messageOf(cause), 'warning') }
       }
       if ((LABEL_LEVELS as readonly string[]).includes(arg)) {

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, test } from 'bun:test'
-import { convertPi, piItems } from './items'
+import { newPiItemState, piAdapter, piItems } from './items'
 import type { PiItemState } from './items'
 import { rawSplit, splitFromRaw } from '../../plugins/context-bar/hooks/split'
-import { walkMessages } from '../../plugins/context-bar/hooks/walk'
+import { MAX_MESSAGES_WALKED, walkMessages } from '../../plugins/context-bar/hooks/walk'
 import type { Walk } from '../../plugins/context-bar/hooks/walk'
 
 describe('piItems', () => {
@@ -118,24 +118,91 @@ describe('the walk on Pi', () => {
   test('an incremental walk equals a full walk', () => {
     const all = session(200)
     let walk: Walk<PiItemState> | undefined
-    for (let end = 3; end <= all.length; end += 5) walk = walkMessages(walk, all.slice(0, end), convertPi)
-    walk = walkMessages(walk, all, convertPi)
+    for (let end = 3; end <= all.length; end += 5) walk = walkMessages(walk, all.slice(0, end), piAdapter)
+    walk = walkMessages(walk, all, piAdapter)
     const full = rawSplit(piItems(all))
     for (const key of Object.keys(full) as (keyof typeof full)[]) expect(Math.abs(walk.raw[key] - full[key]) < 1e-6).toBe(true)
   })
 
   test('a refresh of a 5,000-message session adding a turn takes at most 25 ms at the 95th percentile', () => {
     let all = session(1667)
-    let walk = walkMessages(undefined, all, convertPi)
+    let walk = walkMessages(undefined, all, piAdapter)
     const times: number[] = []
     for (let i = 0; i < 100; i++) {
       all = [...all, ...turn(2000 + i)]
       const t0 = performance.now()
-      walk = walkMessages(walk, all, convertPi)
+      walk = walkMessages(walk, all, piAdapter)
       splitFromRaw(walk.raw, 400_000)
       times.push(performance.now() - t0)
     }
     times.sort((a, b) => a - b)
     expect(times[Math.floor(times.length * 0.95)]!).toBeLessThanOrEqual(25)
+  })
+})
+
+describe('Pi converter and walk: malformed input, cache validity, retention', () => {
+  const sameAsFull = (walk: Walk<PiItemState>, all: unknown[]): void => {
+    const full = rawSplit(piItems(all))
+    for (const key of Object.keys(full) as (keyof typeof full)[]) expect(Math.abs(walk.raw[key] - full[key]) < 1e-6).toBe(true)
+  }
+
+  test('null blocks, missing arguments and odd fields never throw and keep the well-formed part', () => {
+    const items = piItems([
+      null, 4, 'x', [],
+      { role: 'assistant', content: [null, 3, { type: 'text', text: 'abcd' }, { type: 'toolCall', id: 'c', name: 'bash' }, { type: 'toolCall' }] },
+      { role: 'toolResult', toolCallId: 5, toolName: 9, content: 'x' },
+      { role: 'bashExecution', command: 7, output: null },
+      { role: 'mystery', content: [{ type: 'toolCall', id: 'z', name: 'bash', arguments: { command: 'ls' } }] },
+    ])
+    expect(items.filter(i => i.kind === 'text')).toEqual([{ kind: 'text', chars: 4, role: 'assistant' }])
+    expect(piItems({ length: 2 })).toEqual([])
+  })
+
+  test('a changed message at the same length is seen (1,000 characters replacing 3)', () => {
+    let walk = walkMessages(undefined, [{ role: 'user', content: 'abc' }], piAdapter)
+    const edited = [{ role: 'user', content: 'x'.repeat(1000) }]
+    walk = walkMessages(walk, edited, piAdapter)
+    sameAsFull(walk, edited)
+    const grown = [...edited, { role: 'assistant', content: 'hi' }]
+    walk = walkMessages(walk, grown, piAdapter)
+    sameAsFull(walk, grown)
+  })
+
+  test('a late result for an existing message and a replaced branch are seen', () => {
+    const call = { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'cat a' } }] }
+    const before = [{ role: 'user', content: 'go' }, call]
+    let walk = walkMessages(undefined, before, piAdapter)
+    const after = [...before, { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: [{ type: 'text', text: 'r'.repeat(600) }] }]
+    walk = walkMessages(walk, after, piAdapter)
+    sameAsFull(walk, after)
+    const branch = [{ role: 'user', content: 'other' }, { role: 'assistant', content: 'q'.repeat(300) }, { role: 'user', content: 'again' }]
+    walk = walkMessages(walk, branch, piAdapter)
+    sameAsFull(walk, branch)
+  })
+
+  test('over the cap the retained window is split again on every refresh, and the omission is counted', () => {
+    const all = Array.from({ length: MAX_MESSAGES_WALKED + 5 }, (_, i) => ({ role: 'user', content: 'a'.repeat(1 + (i % 5)) }))
+    let walk = walkMessages(undefined, all, piAdapter)
+    const edited = [...all.slice(0, -1), { role: 'user', content: 'b'.repeat(800) }]
+    walk = walkMessages(walk, edited, piAdapter)
+    expect(walk.omitted).toBe(5)
+    sameAsFull(walk, edited.slice(5))
+  })
+
+  test('the walk keeps no command, path or pattern text, and drops a call once its result is read', () => {
+    const secret = 'TOPSECRET-value'
+    const msgs = [
+      { role: 'assistant', content: [
+        { type: 'toolCall', id: 'b', name: 'bash', arguments: { command: `cat ${secret}` } },
+        { type: 'toolCall', id: 'r', name: 'read', arguments: { path: `/x/${secret}` } },
+        { type: 'toolCall', id: 'g', name: 'grep', arguments: { pattern: secret } },
+      ] },
+    ]
+    let walk = walkMessages(undefined, msgs, piAdapter)
+    expect(JSON.stringify([...walk.state.pending.entries()]).includes(secret)).toBe(false)
+    walk = walkMessages(walk, [...msgs, { role: 'toolResult', toolCallId: 'b', toolName: 'bash', content: 'out' }], piAdapter)
+    expect(walk.state.pending.has('b')).toBe(false)
+    expect(walk.raw.reads).toBeGreaterThan(0)
+    expect(newPiItemState().keepText).toBe(true) // /context-bar top keeps labels, for one call only
   })
 })

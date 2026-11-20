@@ -6,13 +6,14 @@ import type { LegendRow } from '../types'
 
 const PERCENT_SCALE = 10
 
-export type MessageItem = { kind: 'text' | 'call' | 'result'; chars: number; role?: 'user' | 'assistant'; tool?: string; command?: string; target?: string }
+/** `read` is set by a walk instead of the command text: whether the command was only read commands. The walk keeps no command text. */
+export type MessageItem = { kind: 'text' | 'call' | 'result'; chars: number; role?: 'user' | 'assistant'; tool?: string; command?: string; target?: string; read?: boolean }
 export type SplitKey = 'prompt' | 'reply' | 'toolIn' | 'toolOut' | 'writes' | 'reads'
 export type MessageSplit = Record<SplitKey, number>
 /** Split rows in display order; also the remainder tie order. */
 export const SPLIT_KEYS: readonly SplitKey[] = ['prompt', 'reply', 'toolIn', 'toolOut', 'writes', 'reads']
 
-const commandIsRead = (command: string): boolean => {
+export const commandIsRead = (command: string): boolean => {
   if (/[`$]|>|<\(/.test(command) || /\|\|/.test(command)) return false
   const steps = command.split(/&&|;/).map(s => s.trim()).filter(Boolean)
   while (steps.length && /^cd\s+\S+$/.test(steps[0])) steps.shift()
@@ -36,7 +37,7 @@ export const classify = (item: MessageItem): SplitKey => {
     return item.role === 'user' ? 'prompt' : 'reply'
   }
   if (item.kind === 'call') return item.tool && WRITE_TOOLS.includes(item.tool as typeof WRITE_TOOLS[number]) ? 'writes' : 'toolIn'
-  if ((item.tool && FILE_READ_TOOLS.includes(item.tool as typeof FILE_READ_TOOLS[number])) || (item.command && commandIsRead(item.command))) return 'reads'
+  if ((item.tool && FILE_READ_TOOLS.includes(item.tool as typeof FILE_READ_TOOLS[number])) || item.read === true || (item.command && commandIsRead(item.command))) return 'reads'
   return 'toolOut'
 }
 

@@ -1,54 +1,95 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { SessionMessage } from 'claude-code'
+import { commandIsRead } from './split'
 import type { MessageItem } from './split'
-import { inspectable } from './walk'
-import type { Convert } from './walk'
+import { boundedJsonLength, inspectable, mix } from './walk'
+import type { Adapter } from './walk'
 
-type Call = { tool: string; command?: string; target?: string; result?: string }
-/** Pairing memory that lives across refreshes: a result added later still finds its call. */
-export type ItemState = { calls: Map<string, Call>; emitted: Set<string> }
-export const newItemState = (): ItemState => ({ calls: new Map(), emitted: new Set() })
+type Rec = Record<string, unknown>
+const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v)
+const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
+const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
 
-/** Convert Claude's message transcript into the shared split contract. A message with an unknown role adds nothing; it never throws. */
-export const toItems = (messages: SessionMessage[], state: ItemState = newItemState()): MessageItem[] => {
+/** A call waiting for its result. A walk keeps only the tool name, whether the command was a read, and the size of an inline result: no command, path or pattern. */
+type Call = { tool: string; read: boolean; command?: string; target?: string; resultChars?: number }
+/** Pairing memory that lives across refreshes: a result added later still finds its call. `keepText` is for `/context-bar top`, which needs labels and lives for one call only. */
+export type ItemState = { calls: Map<string, Call>; emitted: Set<string>; keepText: boolean }
+export const newItemState = (keepText = true): ItemState => ({ calls: new Map(), emitted: new Set(), keepText })
+
+/**
+ * Convert Claude's message transcript into the shared split contract. It never throws: a message that is not an object, or whose
+ * role is not `user` or `assistant`, adds nothing (its tool fields too), and a malformed tool call or result adds nothing.
+ */
+export const toItems = (messages: unknown, state: ItemState = newItemState()): MessageItem[] => {
   const items: MessageItem[] = []
-  const { calls, emitted } = state
-  for (const message of messages) {
-    if (typeof message.text === 'string' && message.text.length > 0) {
-      if (message.role === 'user' || message.role === 'assistant') items.push({ kind: 'text', chars: message.text.length, role: message.role })
+  const { calls, emitted, keepText } = state
+  const resultItem = (chars: number, call: Call | undefined): MessageItem => ({
+    kind: 'result',
+    chars,
+    ...(call?.tool ? { tool: call.tool } : {}),
+    ...(keepText ? { ...(call?.command ? { command: call.command } : {}), ...(call?.target ? { target: call.target } : {}) } : call?.read ? { read: true } : {}),
+  })
+  for (const message of list(messages)) {
+    if (!isRec(message) || (message.role !== 'user' && message.role !== 'assistant')) continue
+    const text = str(message.text)
+    if (text !== undefined && text.length > 0) items.push({ kind: 'text', chars: text.length, role: message.role })
+    for (const use of list(message.toolUses)) {
+      if (!isRec(use)) continue
+      const tool = str(use.tool)
+      const input = isRec(use.input) ? use.input : undefined
+      const command = tool === 'Bash' && inspectable(input?.command) ? input!.command as string : undefined
+      const file = str(input?.file_path)
+      const pattern = str(input?.pattern)
+      const target = (tool === 'Read' || tool === 'NotebookRead') && file !== undefined ? file : (tool === 'Grep' || tool === 'Glob') && pattern !== undefined ? pattern : undefined
+      const id = str(use.tool_use_id)
+      const inline = str(use.text)
+      if (id) {
+        calls.set(id, {
+          tool: tool ?? '',
+          read: command !== undefined && commandIsRead(command),
+          ...(keepText ? { ...(command !== undefined ? { command } : {}), ...(target !== undefined ? { target } : {}) } : {}),
+          ...(inline !== undefined ? { resultChars: inline.length } : {}),
+        })
+      }
+      items.push({ kind: 'call', chars: boundedJsonLength(use.input ?? ''), ...(tool ? { tool } : {}) })
     }
-    for (const use of message.toolUses ?? []) {
-      const tool = typeof use.tool === 'string' ? use.tool : undefined
-      const input = use.input
-      const chars = JSON.stringify(input ?? '').length
-      const command = tool === 'Bash' && inspectable(input?.command) ? input.command : undefined
-      const target = (tool === 'Read' || tool === 'NotebookRead') && typeof input?.file_path === 'string' ? input.file_path
-        : (tool === 'Grep' || tool === 'Glob') && typeof input?.pattern === 'string' ? input.pattern : undefined
-      const id = typeof use.tool_use_id === 'string' ? use.tool_use_id : undefined
-      if (id) calls.set(id, { tool: tool ?? '', command, target, ...(typeof use.text === 'string' ? { result: use.text } : {}) })
-      items.push({ kind: 'call', chars, ...(tool ? { tool } : {}) })
-    }
-    for (const result of message.toolResults ?? []) {
-      const id = typeof result.tool_use_id === 'string' ? result.tool_use_id : undefined
-      const found = id ? calls.get(id) : undefined
+    for (const result of list(message.toolResults)) {
+      if (!isRec(result)) continue
+      const id = str(result.tool_use_id)
       if (id && emitted.has(id)) continue
-      const text = typeof result.text === 'string' ? result.text : ''
-      items.push({ kind: 'result', chars: text.length, ...(found?.tool ? { tool: found.tool } : {}), ...(found?.command ? { command: found.command } : {}), ...(found?.target ? { target: found.target } : {}) })
-      if (id) emitted.add(id)
+      items.push(resultItem((str(result.text) ?? '').length, id ? calls.get(id) : undefined))
+      if (id) { emitted.add(id); calls.delete(id) }
     }
   }
   for (const [id, call] of calls) {
-    if (!emitted.has(id) && call.result !== undefined) {
-      items.push({ kind: 'result', chars: call.result.length, ...(call.tool ? { tool: call.tool } : {}), ...(call.command ? { command: call.command } : {}), ...(call.target ? { target: call.target } : {}) })
+    if (!emitted.has(id) && call.resultChars !== undefined) {
+      items.push(resultItem(call.resultChars, call))
       emitted.add(id)
-      call.result = undefined
+      calls.delete(id)
     }
   }
   return items
 }
 
-export const convertClaude: Convert<ItemState> = (messages, state) => {
-  const kept = state ?? newItemState()
-  return { items: toItems(messages as SessionMessage[], kept), state: kept }
+/** Changes whenever a message's size-bearing parts change: role, text length, how many calls and results, and their text lengths. */
+export const signature = (message: unknown): number => {
+  if (!isRec(message)) return 0
+  let h = mix(17, (str(message.role) ?? '').length)
+  h = mix(h, (str(message.text) ?? '').length)
+  const uses = list(message.toolUses)
+  h = mix(h, uses.length)
+  for (const use of uses) if (isRec(use)) h = mix(mix(h, (str(use.text) ?? '').length), (str(use.tool_use_id) ?? '').length)
+  const results = list(message.toolResults)
+  h = mix(h, results.length)
+  for (const r of results) if (isRec(r)) h = mix(mix(h, (str(r.text) ?? '').length), (str(r.tool_use_id) ?? '').length)
+  return h
+}
+
+/** The walk's text-free converter: keeps only pairing metadata. */
+export const claudeAdapter: Adapter<ItemState> = {
+  convert: (messages, state) => {
+    const kept = state ?? newItemState(false)
+    return { items: toItems(messages, kept), state: kept }
+  },
+  signature,
 }

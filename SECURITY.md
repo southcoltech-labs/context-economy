@@ -32,8 +32,11 @@ it the process is killed and the rewrite is not used. The rewrite as a whole, re
 
 ### context-bar and your transcript
 
-context-bar reads the message transcript to size it and keeps only numbers: sums, token counts and timestamps for the trend,
-at most 120 points per series, in memory. It writes and logs nothing and starts no process or connection. `CE_CONTEXT_BAR=off`
+context-bar reads the message transcript to size it. Between refreshes it keeps in memory only numbers (sums, token counts, a
+size signature per message, timestamps for the trend, at most 120 points per series) and, to pair a result with its call, the
+tool-call id, the tool name and whether a command was only read commands. It keeps no command, path, pattern, message or
+result text; `/context-bar top` holds text only while it builds its list. It writes and logs nothing and starts no process or
+connection. `CE_CONTEXT_BAR=off`
 turns it off on both hosts (only the exact value `off`).
 
 Text from the transcript can appear in one place: `/context-bar top`, printed to you in the session. For a Bash result it shows

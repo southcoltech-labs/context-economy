@@ -243,6 +243,23 @@ describe('context-bar widget', () => {
       expect(lines[2]).toContain('npm')
       expect(lines[2]).not.toContain('npm test') // arguments are never shown
     })
+    test('/context-bar top completes on a malformed transcript and lists the well-formed part', async () => {
+      const s = setup({ messages: [null, 3, 'x', { role: 'assistant', content: [null, { type: 'toolCall' }] }, { role: 'mystery', content: 'zzz' }, { role: 'user', content: 'x'.repeat(400) }] as never })
+      await s.commands['context-bar']!.handler('top', s.ctx)
+      expect(s.notes.at(-1)).toContain('user text')
+    })
+    test('/context-bar top over the walk limit lists five rows and says older messages were not read', async () => {
+      const s = setup({ messages: Array.from({ length: 20_004 }, () => ({ role: 'user', content: 'same size text' })) })
+      await s.commands['context-bar']!.handler('top', s.ctx)
+      const lines = s.notes.at(-1)!.split('\n')
+      expect(lines).toHaveLength(6)
+      expect(lines[0]).toContain('4 older not read')
+    })
+    test('a refresh and the band render complete on a malformed transcript', async () => {
+      const s = setup({ messages: [null, { role: 'assistant', content: [null] }, { role: 'toolResult' }, { role: 'user', content: 'hi' }] as never })
+      await s.commands['context-bar']!.handler('r', s.ctx)
+      expect(s.notes.at(-1)).toBe('Context band refreshed.')
+    })
     test('v0.4 /context-bar top shows text items as user text / reply text', async () => {
       const s = setup({ messages: [
         { role: 'user', content: [{ type: 'text', text: 'x'.repeat(400) }] },
