@@ -16,7 +16,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/tool-gateway/index.ts"
+      "./extensions/tool-gateway/index.ts",
+      "./extensions/context-bar/index.ts"
     ]
   },
   "scripts": {

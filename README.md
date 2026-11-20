@@ -1,10 +1,11 @@
 # context-economy
 
-Plugins for Claude Code and extensions for Pi that cut context cost. The first one is:
+Plugins for Claude Code and extensions for Pi that cut context cost, and show where it goes:
 
 | Plugin | What it does | Claude Code | Pi |
 | --- | --- | --- | --- |
 | [tool-gateway](plugins/tool-gateway/) | Rewrites shell commands through a verified RTK executable and keeps a metadata-only ledger of tool calls | Yes | Yes |
+| [context-bar](plugins/context-bar/) | A band above the prompt that shows what fills the context window, by category. Display only: it runs nothing, writes nothing and sends nothing | Yes | Yes |
 
 It starts no network connection or model call of its own. See [SECURITY.md](SECURITY.md) for what it reads, writes and runs, and what stays on disk.
 
@@ -81,6 +82,7 @@ The environment variable `CE_RTK_BIN` takes precedence over the file. In Claude 
 ```bash
 claude plugin marketplace add southcoltech-labs/context-economy#release
 claude plugin install tool-gateway@context-economy
+claude plugin install context-bar@context-economy     # optional: the context band
 ```
 
 Restart Claude Code. `#release` is the stable channel: it only ever moves to a version that passed the release checks.
@@ -91,7 +93,7 @@ Restart Claude Code. `#release` is the stable channel: it only ever moves to a v
 pi install git:github.com/southcoltech-labs/context-economy@release
 ```
 
-Pi loads the tool-gateway extension from the package. Restart Pi.
+Pi loads the tool-gateway and context-bar extensions from the package. Restart Pi.
 
 ## 3. Update
 
@@ -133,11 +135,12 @@ Your data is kept across rollback, update and uninstall: the gateway ledgers and
 ## 5. Turn off or uninstall
 
 - **Turn off the gateway:** set `CE_TOOL_GATEWAY=off` (Claude Code `settings.json` `env`, or the shell for Pi), then restart. On Pi this also leaves `edit`, `write` and the background tools as Pi and their packages define them. Removing `rtk.path` and `CE_RTK_BIN` stops rewriting but keeps the ledger.
-- **Disable (Claude Code):** `claude plugin disable tool-gateway@context-economy`.
-- **Uninstall (Claude Code):** `claude plugin uninstall tool-gateway@context-economy`, or remove everything with `claude plugin marketplace remove context-economy`.
+- **Turn off the context band:** set `CE_CONTEXT_BAR=off` the same way (only the exact value `off`), then restart.
+- **Disable (Claude Code):** `claude plugin disable tool-gateway@context-economy` (and `context-bar@context-economy`).
+- **Uninstall (Claude Code):** `claude plugin uninstall tool-gateway@context-economy` and `claude plugin uninstall context-bar@context-economy`, or remove everything with `claude plugin marketplace remove context-economy`.
 - **Uninstall (Pi):** `pi remove git:github.com/southcoltech-labs/context-economy` (with or without the `@…` you installed).
 
-Uninstalling leaves your data in place: in `~/.claude/context-economy/`, the folders `gateway-ledger/` and `gateway-ledger-pi/` and the file `config.json`. To delete it, remove them yourself.
+context-bar writes no data, so uninstalling it leaves nothing. Uninstalling leaves your data in place: in `~/.claude/context-economy/`, the folders `gateway-ledger/` and `gateway-ledger-pi/` and the file `config.json`. To delete it, remove them yourself.
 
 ## Releases and tags
 

@@ -13,6 +13,11 @@
       "name": "tool-gateway",
       "source": "./plugins/tool-gateway",
       "description": "Rewrite Bash through a verified RTK executable (never PATH) and keep a metadata-only ledger of tool calls"
+    },
+    {
+      "name": "context-bar",
+      "source": "./plugins/context-bar",
+      "description": "A band above the prompt that shows what fills the context window, by category"
     }
   ]
 }

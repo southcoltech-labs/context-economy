@@ -1,0 +1,43 @@
+{
+  "name": "context-bar",
+  "version": "0.1.2",
+  "description": "Band above the prompt: stacked context-window bar by category, static prefix shaded and marked, conversation rows sorted by size, autocompact marker, legend at min/norm/max detail.",
+  "author": {
+    "name": "South Col Tech, Inc.",
+    "email": "support@southcoltech.com"
+  },
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "labels": {
+      "type": "string",
+      "title": "Label level",
+      "description": "Legend detail: min, norm or max (norm puts System, Tool defs, MCP, Agent defs, AGENTS.md and Skills into one Static prefix row). /context-bar min|norm|max changes it for this session.",
+      "default": "norm"
+    },
+    "refreshGrowthPercent": {
+      "type": "number",
+      "title": "Refresh after growth (%)",
+      "description": "Re-measure the shown band when the context has grown or shrunk by this share of the window since the last measure (manual /context-bar r and compaction always refresh).",
+      "default": 5
+    },
+    "trendRefreshSeconds": {
+      "type": "number",
+      "title": "Trend redraw interval (seconds)",
+      "description": "How often the expanded trend graph redraws by itself while the session is idle: 15, 30 or 60.",
+      "default": 30
+    },
+    "theme": {
+      "type": "string",
+      "title": "Colour theme",
+      "description": "auto follows the Claude Code theme; dark or light forces one",
+      "default": "auto"
+    },
+    "colors": {
+      "type": "string",
+      "title": "Colour overrides",
+      "description": "JSON like {\"dark\":{\"reads\":\"#64b5f6\"}}; keys are categories, values #rrggbb, per theme",
+      "default": ""
+    }
+  }
+}
