@@ -196,13 +196,25 @@ test('an append to 5,000 messages whose calls carry 1,000-field arguments does n
   const all: Msg[] = Array.from({ length: 5000 }, (_, i) => big(i))
   let walk = walkMessages(undefined, all, claudeAdapter)
   const times: number[] = []
-  for (let n = 0; n < 5; n++) {
+  for (let n = 0; n < 40; n++) {
     all.push({ role: 'user', text: 'next' })
     const t0 = performance.now()
     walk = walkMessages(walk, all, claudeAdapter)
     times.push(performance.now() - t0)
   }
   times.sort((a, b) => a - b)
-  expect(times[2]!).toBeLessThan(25)
+  expect(times[Math.ceil(times.length * 0.95) - 1]!).toBeLessThan(25) // p95 of 40 appends, the SPEC metric
   sameAsFull(walk, all)
+})
+
+test('a first-field edit of a 60-field argument object is seen, with and without a following append', () => {
+  const fields = (first: string): Record<string, string> => Object.fromEntries(Array.from({ length: 60 }, (_, k) => ['f' + k, k === 0 ? first : 'v' + k]))
+  const base = [callMsg('a', 'Bash', fields('x')), resultMsg('a', 40)]
+  let walk = walkMessages(undefined, base, claudeAdapter)
+  const changed = [callMsg('a', 'Bash', fields('x'.repeat(4000))), resultMsg('a', 40)]
+  walk = walkMessages(walk, changed, claudeAdapter)
+  sameAsFull(walk, changed)
+  const grown = [...changed, { role: 'user', text: 'more' }]
+  walk = walkMessages(walk, grown, claudeAdapter)
+  sameAsFull(walk, grown)
 })

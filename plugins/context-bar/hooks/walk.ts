@@ -87,18 +87,56 @@ export const hashText = (value: unknown): number => {
 }
 /** How many values of a tool call's arguments its signature looks at. Edits past these are not noticed (see SPEC, Cache validity). */
 export const SIGNATURE_NODES = 48
-/** What a message's signature takes from one tool call's arguments: their size over the first SIGNATURE_NODES values, and the command's hash. */
+/** What a message's signature takes from one tool call's arguments: a hash over the first SIGNATURE_NODES values, and the command's hash. */
 export const argumentSignature = (args: unknown, command: unknown): number => {
-  let size = 0
+  let sample = 0
   if (typeof args === 'object' && args !== null) {
-    const known = argumentSizes.get(args)
-    if (known !== undefined) size = known
-    else { size = boundedJsonLength(args, SIGNATURE_NODES); argumentSizes.set(args, size) }
-  } else size = boundedJsonLength(args, SIGNATURE_NODES)
-  return mix(mix(5, size), hashText(command))
+    const known = argumentSamples.get(args)
+    if (known !== undefined) sample = known
+    else { sample = sampleHash(args, SIGNATURE_NODES); argumentSamples.set(args, sample) }
+  } else sample = sampleHash(args, SIGNATURE_NODES)
+  return mix(mix(5, sample), hashText(command))
 }
-/** The bounded size of an argument object already seen, so an append does not traverse the arguments of every earlier call again. An object edited in place after it was first seen is not re-read. */
-const argumentSizes = new WeakMap<object, number>()
+/**
+ * A hash of the first `maxNodes` values of a value, in order: each key, each scalar (its type, its length or value, and the hash
+ * of up to 384 characters of a string), with nesting marked. It stops at the budget and then mixes in an overflow marker, so a
+ * change inside the sampled prefix is seen even when the whole value is far bigger than the prefix. Never throws; every
+ * visit counts, ignored values included, and a wide object is walked with `for...in` only as far as the budget.
+ */
+export const sampleHash = (value: unknown, maxNodes: number): number => {
+  let h = 11
+  let nodes = 0
+  let cut = false
+  const walk = (v: unknown, depth: number): void => {
+    if (cut) return
+    nodes += 1
+    if (nodes > maxNodes || depth > MAX_DEPTH) { cut = true; return }
+    if (v === null) { h = mix(h, 1); return }
+    switch (typeof v) {
+      case 'string': h = mix(mix(mix(h, 2), v.length), hashText(v)); return
+      case 'number': h = mix(mix(h, 3), Number.isInteger(v) ? v : Math.round(v * 1e6)); return
+      case 'boolean': h = mix(h, v ? 4 : 5); return
+      case 'object': break
+      default: h = mix(h, 6); return
+    }
+    if (Array.isArray(v)) {
+      h = mix(mix(h, 7), v.length)
+      for (let i = 0; i < v.length && !cut; i++) walk(v[i], depth + 1)
+      return
+    }
+    h = mix(h, 8)
+    for (const key in v as object) {
+      if (cut) return
+      if (!Object.prototype.hasOwnProperty.call(v, key)) continue
+      h = mix(mix(h, key.length), hashText(key))
+      walk((v as Record<string, unknown>)[key], depth + 1)
+    }
+  }
+  try { walk(value, 0) } catch { return 0 }
+  return cut ? mix(h, 9) : h
+}
+/** The sample hash of an argument object already seen, so an append does not traverse the arguments of every earlier call again. An object edited in place after it was first seen is not re-read. */
+const argumentSamples = new WeakMap<object, number>()
 
 /** What a refresh remembers: the sums so far, how far the transcript was read, and one signature per message read. */
 export type Walk<S> = { seen: number; raw: RawSplit; state: S; omitted: number; signatures: number[] }

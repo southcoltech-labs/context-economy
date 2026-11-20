@@ -233,18 +233,30 @@ describe('Pi cache validity covers classification, pairing and argument size', (
     })
   }
 
+  test('a first-field edit of a 60-field argument object is seen, also after an append', () => {
+    const fields = (first: string) => Object.fromEntries(Array.from({ length: 60 }, (_, k) => ['f' + k, k === 0 ? first : 'v' + k]))
+    const base = [call('a', 'bash', fields('x')), result('a', 40)]
+    let walk = walkMessages(undefined, base, piAdapter)
+    const changed = [call('a', 'bash', fields('x'.repeat(4000))), result('a', 40)]
+    walk = walkMessages(walk, changed, piAdapter)
+    matches(walk, changed)
+    const grown = [...changed, { role: 'user', content: 'more' }]
+    walk = walkMessages(walk, grown, piAdapter)
+    matches(walk, grown)
+  })
+
   test('an append to 5,000 messages whose calls carry 1,000-field arguments does not traverse the old arguments again', () => {
     const all: unknown[] = Array.from({ length: 5000 }, (_, i) => call(`t${i}`, 'bash', Object.fromEntries(Array.from({ length: 1000 }, (_, k) => ['f' + k, 'v' + k]))))
     let walk = walkMessages(undefined, all, piAdapter)
     const times: number[] = []
-    for (let n = 0; n < 5; n++) {
+    for (let n = 0; n < 40; n++) {
       all.push({ role: 'user', content: 'next' })
       const t0 = performance.now()
       walk = walkMessages(walk, all, piAdapter)
       times.push(performance.now() - t0)
     }
     times.sort((a, b) => a - b)
-    expect(times[2]!).toBeLessThan(25)
+    expect(times[Math.ceil(times.length * 0.95) - 1]!).toBeLessThan(25) // p95 of 40 appends, the SPEC metric
     matches(walk, all)
   })
 })

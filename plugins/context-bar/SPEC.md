@@ -63,13 +63,13 @@ These bound the work and the memory the plugin may use, however long the session
 | Refresh time | at most 25 ms at the 95th percentile for a refresh that adds a turn to a 5,000-message session (measured in the tests; the figure is a budget, not a promise for every machine) |
 | Messages walked in one full split | the latest 20,000; older ones are not read and the band marks the estimate with `≈`. Over this limit every refresh splits the whole retained window again; the "only new messages" rule does not apply there |
 | `/context-bar top` | reads the latest 20,000 messages, lists exactly 5 rows (equal sizes keep transcript order) and says how many older messages were not read |
-| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length. The size of a tool call's arguments is found by a bounded count (stops past 1 MiB, 100,000 values or 64 levels of nesting; every property or element visited counts, ignored ones included, and a wide object is walked only as far as the budget), never by building the whole text. A message's signature reads at most 48 values of its arguments, once per argument object |
+| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length. The size of a tool call's arguments is found by a bounded count (stops past 1 MiB, 100,000 values or 64 levels of nesting; every property or element visited counts, ignored ones included, and a wide object is walked only as far as the budget), never by building the whole text. A message's signature reads at most 48 values of its arguments, once per argument object (about 5,000 messages with 1,000-field arguments: p95 of 40 appends under 25 ms in the tests, on one machine) |
 | Trend history | at most 120 points per series, in memory only |
 
 ## Cache validity
 
 A refresh keeps, for each message already read, a signature: a hash of the role, the text size, and for each tool call its tool
-name, its id, the size of its arguments (counted over the first 48 values) and a hash of its command (its length and its first
+name, its id, a hash of its arguments' first 48 values (keys, value types and sizes, and up to 384 characters of each string; a flag when there are more) and a hash of its command (its length and its first
 256 and last 128 characters); for each result its id and size. It adds only the new messages when every earlier signature is
 unchanged and the transcript did not get shorter. An edited message, a late result, a replaced branch, a changed tool, id or
 command class (for example `cat x` to `npm x`) and a compaction all change a signature or the length, so the transcript is
