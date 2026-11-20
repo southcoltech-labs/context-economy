@@ -16,7 +16,7 @@ export const SPLIT_KEYS: readonly SplitKey[] = ['prompt', 'reply', 'toolIn', 'to
 export const commandIsRead = (command: string): boolean => {
   if (/[`$]|>|<\(/.test(command) || /\|\|/.test(command)) return false
   const steps = command.split(/&&|;/).map(s => s.trim()).filter(Boolean)
-  while (steps.length && /^cd\s+\S+$/.test(steps[0])) steps.shift()
+  while (steps.length && /^cd\s+\S+$/.test(steps[0]!)) steps.shift()
   if (!steps.length) return false
   const readStage = (stage: string): boolean => {
     const words = stage.trim().split(/\s+/)
@@ -26,7 +26,7 @@ export const commandIsRead = (command: string): boolean => {
   }
   return steps.every(step => {
     const stages = step.split('|')
-    return readStage(stages[0]) && stages.slice(1).every(stage => READ_FILTERS.includes(stage.trim().split(/\s+/)[0] as typeof READ_FILTERS[number]))
+    return readStage(stages[0]!) && stages.slice(1).every(stage => READ_FILTERS.includes(stage.trim().split(/\s+/)[0] as typeof READ_FILTERS[number]))
   })
 }
 
@@ -60,7 +60,7 @@ export const splitFromRaw = (raw: RawSplit, total: number): MessageSplit => {
   const out = Object.fromEntries(keys.map(k => [k, Math.floor(exact[k])])) as MessageSplit
   const ranked = [...keys].sort((a, b) => (exact[b] - Math.floor(exact[b])) - (exact[a] - Math.floor(exact[a])) || keys.indexOf(a) - keys.indexOf(b))
   const remainder = total - keys.reduce((n, k) => n + out[k], 0)
-  for (let i = 0; i < remainder; i++) out[ranked[i]] += 1
+  for (let i = 0; i < remainder; i++) out[ranked[i]!] += 1
   return out
 }
 
@@ -72,7 +72,7 @@ export const splitMessages = (items: readonly MessageItem[], total: number): Mes
 export const applySplit = <T extends LegendRow>(rows: readonly T[], split: MessageSplit, total: number): (T | LegendRow)[] => {
   const index = rows.findIndex(r => r.key === 'messages')
   if (index < 0) throw new Error('context-bar: messages row is missing')
-  const messageTotal = rows[index].tokens
+  const messageTotal = rows[index]!.tokens
   const keys = SPLIT_KEYS
   if (Object.values(split).some(n => !Number.isInteger(n) || n < 0) || keys.reduce((n, k) => n + split[k], 0) !== messageTotal) throw new Error('context-bar: split total does not match messages row')
   // Writes is the one split row hidden at zero: most sessions never write through a file tool (view.test.ts pins five rows then).

@@ -11,14 +11,14 @@ import { PALETTES, THEMES } from './palettes'
 /** CIE76 colour distance in Lab (sRGB, D65). */
 const lab = (hex: string): [number, number, number] => {
   const lin = (c: number) => (c > 0.04045 ? ((c + 0.055) / 1.055) ** 2.4 : c / 12.92)
-  const [r, g, b] = [1, 3, 5].map(i => lin(parseInt(hex.slice(i, i + 2), 16) / 255))
+  const [r = 0, g = 0, b = 0] = [1, 3, 5].map(i => lin(parseInt(hex.slice(i, i + 2), 16) / 255))
   const x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.95047
   const y = r * 0.2126 + g * 0.7152 + b * 0.0722
   const z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.08883
   const f = (v: number) => (v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116)
   return [116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))]
 }
-const deltaE = (a: string, b: string) => Math.hypot(...lab(a).map((v, i) => v - lab(b)[i]))
+const deltaE = (a: string, b: string) => Math.hypot(...lab(a).map((v, i) => v - lab(b)[i]!))
 const SPLIT = ['prompt', 'reply', 'toolIn', 'toolOut', 'writes', 'reads'] as const
 const MIN_SPLIT_DELTA_E = 28
 

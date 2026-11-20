@@ -10,6 +10,7 @@ import type { ContextView } from '../types'
 
 const plain = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
 const view: ContextView = {
+  compactionText: '',
   usedTokens: 20000, windowTokens: 100000, percent: 20, thresholdTokens: 80000, isAutoCompactEnabled: true,
   rows: [
     { key: 'system', label: 'System', tokens: 5000, percent: 5 },
@@ -26,8 +27,8 @@ describe('renderLines', () => {
     expect(lines[0]).toContain('20k of 100k · compacts at 80k')
     expect(lines[0]).toContain('20.0%')
     expect(lines.at(-1)).toBe('distribution est.')
-    expect(lines[1].length).toBe(100)
-    expect(lines[1][80]).toBe('│')
+    expect(lines[1]!.length).toBe(100)
+    expect(lines[1]![80]).toBe('│')
     expect(lines.slice(2).join('\n')).toContain('Messages')
   })
   test('the compaction text shares the footer line, note on the left and compaction on the right, filling the width', () => {
@@ -44,7 +45,7 @@ describe('renderLines', () => {
     expect(lines.join('\n')).not.toContain('compacted')
   })
   test('empty note adds no footer line and no leading separator', () => {
-    expect(plain(renderLines({ ...view, rows: view.rows.slice(1) }, null, 100, '', 'max', PALETTES.dark)[0])).not.toContain(' · ')
+    expect(plain(renderLines({ ...view, rows: view.rows.slice(1) }, null, 100, '', 'max', PALETTES.dark)[0]!)).not.toContain(' · ')
   })
   test('no line exceeds width at narrow, medium, or wide sizes', () => {
     for (const width of [20, 60, 120]) {
@@ -52,8 +53,8 @@ describe('renderLines', () => {
     }
   })
   test('no view includes n/a and optional error', () => {
-    expect(plain(renderLines(null, null, 40, '', 'max', PALETTES.dark)[0])).toContain('n/a')
-    expect(plain(renderLines(null, 'boom', 40, '', 'max', PALETTES.dark)[0])).toContain('n/a (boom)')
+    expect(plain(renderLines(null, null, 40, '', 'max', PALETTES.dark)[0]!)).toContain('n/a')
+    expect(plain(renderLines(null, 'boom', 40, '', 'max', PALETTES.dark)[0]!)).toContain('n/a (boom)')
   })
   test('colours use 24-bit ANSI', () => {
     expect(renderLines(view, null, 100, '', 'max', PALETTES.dark)[1]).toContain('\x1b[38;2;')
@@ -61,7 +62,7 @@ describe('renderLines', () => {
   test('overflow fills bar without throwing', () => {
     const over: ContextView = { ...view, usedTokens: 190500, percent: 190.5, rows: [{ key: 'system', label: 'System', tokens: 50000, percent: 50 }, { key: 'messages', label: 'Messages', tokens: 140500, percent: 140.5 }] }
     const lines = renderLines(over, null, 80, '', 'max', PALETTES.dark).map(plain)
-    expect(lines[1].length).toBe(80)
+    expect(lines[1]!.length).toBe(80)
     expect(lines[1]).not.toContain(' ')
   })
   const split: ContextView = { ...view, rows: [...view.rows.slice(0, 1),
@@ -93,8 +94,8 @@ describe('renderLines', () => {
     for (const level of ['min', 'norm', 'max'] as const) {
       const lines = renderLines(full, null, 100, '', level, PALETTES.dark).map(plain)
       expect(lines[1]).toContain('┃')
-      expect(lines[1][5]).toBe('┃')
-      expect(lines[1][80]).toBe('│')
+      expect(lines[1]![5]).toBe('┃')
+      expect(lines[1]![80]).toBe('│')
       expect(lines[0]).toContain('prefix 5k · ')
     }
   })

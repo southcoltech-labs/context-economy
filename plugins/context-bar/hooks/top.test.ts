@@ -36,16 +36,16 @@ describe('topItems', () => {
 
   test('a Bash row shows the command name only, never its arguments; the command wins over target', () => {
     const [row] = topItems([{ kind: 'result', chars: 10, tool: 'Bash', command: 'rg  -n\n foo', target: 'x' }], 1)
-    expect(row.label).toBe('Bash rg')
+    expect(row!.label).toBe('Bash rg')
   })
 
   test('cuts labels longer than 48 chars to 47 + ellipsis', () => {
     const [row] = topItems([read(10, 'a'.repeat(80))], 1)
-    expect(row.label.length).toBe(48)
-    expect(row.label.endsWith('…')).toBe(true)
-    expect(row.label.startsWith('Read aaa')).toBe(true)
+    expect(row!.label.length).toBe(48)
+    expect(row!.label.endsWith('…')).toBe(true)
+    expect(row!.label.startsWith('Read aaa')).toBe(true)
     const [exact] = topItems([read(10, 'b'.repeat(43))], 1) // 'Read ' + 43 = 48
-    expect(exact.label).toBe(`Read ${'b'.repeat(43)}`)
+    expect(exact!.label).toBe(`Read ${'b'.repeat(43)}`)
   })
 
   test('ties keep input order; zero-token items are dropped', () => {

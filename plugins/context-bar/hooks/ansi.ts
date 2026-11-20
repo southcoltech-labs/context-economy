@@ -18,7 +18,7 @@ const fg = (color: string | undefined): string => {
   if (color === undefined) return ''
   const m = HEX_COLOR.exec(NAMED_COLORS[color] ?? color)
   if (!m) throw new Error(`context-bar: unknown colour ${color}`)
-  return `\x1b[38;2;${parseInt(m[1], 16)};${parseInt(m[2], 16)};${parseInt(m[3], 16)}m`
+  return `\x1b[38;2;${parseInt(m[1]!, 16)};${parseInt(m[2]!, 16)};${parseInt(m[3]!, 16)}m`
 }
 const colorOf = (palette: Palette, key: string): string | undefined => key === GAP_KEY ? undefined : palette[key as CategoryKey]
 const widthOf = (spans: readonly Span[]): number => spans.reduce((n, s) => n + s.text.length, 0)

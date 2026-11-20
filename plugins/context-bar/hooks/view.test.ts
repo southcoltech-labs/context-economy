@@ -96,10 +96,10 @@ describe('buildView', () => {
 
 describe('summaryText', () => {
   test('used of window, compacts at', () => {
-    expect(summaryText(buildView(make(rows)))).toBe('212k of 1M · compacts at 950k')
+    expect(summaryText({ ...buildView(make(rows)), compactionText: '' })).toBe('212k of 1M · compacts at 950k')
   })
   test('autocompact off', () => {
     const v = buildView(make(rows, OFF))
-    expect(summaryText(v)).toBe('212k of 1M · autocompact off')
+    expect(summaryText({ ...v, compactionText: '' })).toBe('212k of 1M · autocompact off')
   })
 })

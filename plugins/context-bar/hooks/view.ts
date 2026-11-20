@@ -38,8 +38,8 @@ const threshold = (b: SessionContextBreakdown): number | null => {
 }
 
 /** Turn the engine's breakdown into plain numbers for the band. */
-/** `items` are split here; `walked` brings sums already made by a walk (`approximate` when older messages were left out). */
-export const buildView = (b: SessionContextBreakdown, items: readonly MessageItem[] | { raw: RawSplit; approximate: boolean } = []): ContextView => {
+/** The view without its compaction text, which the caller adds from its own record. `items` are split here; `walked` brings sums already made by a walk (`approximate` when older messages were left out). */
+export const buildView = (b: SessionContextBreakdown, items: readonly MessageItem[] | { raw: RawSplit; approximate: boolean } = []): Omit<ContextView, 'compactionText'> => {
   if (!(b.rawMaxTokens > 0)) throw new Error('breakdown: window is not positive')
   const sums = new Map<CategoryKey, number>()
   for (const c of b.categories) {

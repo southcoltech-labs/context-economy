@@ -111,7 +111,7 @@ test('toItems: a result with no matching call has no tool and classifies as tool
     ] },
   ] as never)
   expect(items).toEqual([{ kind: 'result', chars: 6 }])
-  expect(classify(items[0])).toBe('toolOut')
+  expect(classify(items[0]!)).toBe('toolOut')
 })
 
 test('toItems: answered toolUses give result items right after their calls when toolResults are absent', () => {

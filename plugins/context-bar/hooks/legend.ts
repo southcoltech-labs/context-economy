@@ -33,7 +33,7 @@ export const legendGrid = (rows: readonly LegendRow[], width: number): LegendCel
   const gap = ' '.repeat(LEGEND_FIELD_GAP)
   const cells = rows.map((r, i) => {
     const label = r.label.padEnd(labelWidth)
-    const value = `${tokens[i].padStart(tokenWidth)}${gap}${percents[i].padStart(percentWidth)}`
+    const value = `${tokens[i]!.padStart(tokenWidth)}${gap}${percents[i]!.padStart(percentWidth)}`
     return { key: r.key, label, value, text: `${label}${gap}${value}` }
   })
   const n = columnsFor(widest(cells.map(c => c.text)), width)

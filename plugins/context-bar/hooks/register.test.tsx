@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import { PALETTES } from './palettes'
 
 const RUN = {
@@ -31,7 +33,7 @@ test('hidden band makes no usage calls after a turn', async ($, on) => {
   expect(calls).toBe(0)
 })
 
-const counting = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+const counting = (on: On) => {
   const seen = { calls: 0 }
   on('session.usage', () => {
     seen.calls += 1
@@ -125,7 +127,6 @@ const MESSAGES = [
   ] },
 ]
 
-type On = Parameters<Parameters<typeof test>[1]>[1]
 
 /** Mock usage (counted) and messages; the turn.complete / compact bottoms answer. */
 const mocked = (on: On, compacted: unknown = { messages: [KEPT] }, messages: unknown = MESSAGES) => {
@@ -141,7 +142,7 @@ const mocked = (on: On, compacted: unknown = { messages: [KEPT] }, messages: unk
   return seen
 }
 
-const mountBand = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
+const mountBand = ($: Engine) =>
   $.ui.mount({
     plugin: 'context-bar',
     surface: 'terminal',
@@ -150,7 +151,7 @@ const mountBand = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
   })
 
 const rounds = async (
-  $: Parameters<Parameters<typeof test>[1]>[0],
+  $: Engine,
   n: number,
   turn: never = MAIN_TURN,
 ) => {
@@ -580,7 +581,7 @@ const mockedRich = (on: On) => {
   on('ui.render', () => ({ type: 'Text', props: {}, children: [] }) as never)
 }
 
-const seeText = async ($: Parameters<Parameters<typeof test>[1]>[0], re: RegExp) => {
+const seeText = async ($: Engine, re: RegExp) => {
   const ui = await mountBand($)
   const found = (await ui.find({ type: 'Text', text: re })) !== undefined
   await ui.unmount()
@@ -682,7 +683,7 @@ test('the breakdown is always counted with summary detail: no plugin-initiated t
 })
 
 // v0.7 themes: palette follows the theme option, else the host theme; overrides from the colors option.
-const freeColour = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+const freeColour = async ($: Engine) => {
   const ui = await mountBand($)
   const found = await ui.find({ type: 'Text', text: /^░+$/ })
   await ui.unmount()
