@@ -1,6 +1,6 @@
 {
   "name": "context-bar",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Band above the prompt: stacked context-window bar by category, static prefix shaded and marked, conversation rows sorted by size, autocompact marker, legend at min/norm/max detail.",
   "author": {
     "name": "South Col Tech, Inc.",
