@@ -191,7 +191,7 @@ test('boundedJsonLength visits at most the budget of values however wide the obj
   expect(performance.now() - t0).toBeLessThan(200)
 })
 
-test('an append to 5,000 messages whose calls carry 1,000-field arguments does not traverse the old arguments again', () => {
+test('an append to 5,000 messages whose calls carry 1,000-field arguments does not traverse the old arguments again', { timeoutMs: 60_000 }, () => { // building and reading the fixture is slow on a shared runner; only the appends are timed
   const big = (i: number): Msg => callMsg(`t${i}`, 'Bash', Object.fromEntries(Array.from({ length: 1000 }, (_, k) => ['f' + k, 'v' + k])))
   const all: Msg[] = Array.from({ length: 5000 }, (_, i) => big(i))
   let walk = walkMessages(undefined, all, claudeAdapter)

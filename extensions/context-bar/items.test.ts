@@ -258,5 +258,5 @@ describe('Pi cache validity covers classification, pairing and argument size', (
     times.sort((a, b) => a - b)
     expect(times[Math.ceil(times.length * 0.95) - 1]!).toBeLessThan(25) // p95 of 40 appends, the SPEC metric
     matches(walk, all)
-  })
+  }, 60_000) // building and reading the fixture is slow on a shared runner (6 s on macOS CI); only the appends are timed
 })
