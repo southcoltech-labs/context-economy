@@ -155,3 +155,54 @@ test('argument sizing is exact for ordinary values and stops early for huge or d
   const wide = Array.from({ length: 2_000_000 }, () => 'abcdefghij')
   expect(boundedJsonLength(wide)).toBeGreaterThan(MAX_PARSED_CHARS)
 })
+
+const callMsg = (id: string, tool: string, input: unknown): Msg => ({ role: 'assistant', text: '', toolUses: [{ tool, input, tool_use_id: id }] })
+const resultMsg = (id: string, n: number): Msg => ({ role: 'user', text: '', toolResults: [{ tool_use_id: id, text: 'r'.repeat(n) }] })
+
+test('an edited call argument, an equal-length read to non-read edit, a tool change and an id change all match a full split, with and without a following append', () => {
+  const edits: [string, (base: Msg[]) => Msg[]][] = [
+    ['argument growth', b => [callMsg('a', 'Bash', { command: 'echo this is a much longer command line' }), b[1]!]],
+    ['cat to npm, same length', b => [callMsg('a', 'Bash', { command: 'npm x' }), b[1]!]],
+    ['tool change, same sizes', b => [callMsg('a', 'Read', { command: 'cat x' }), b[1]!]],
+    ['id change, same length', b => [callMsg('b', 'Bash', { command: 'cat x' }), b[1]!]],
+    ['role change, same sizes', b => [{ ...b[0]!, role: 'user' }, b[1]!]],
+  ]
+  for (const [name, edit] of edits) {
+    const base = [callMsg('a', 'Bash', { command: 'cat x' }), resultMsg('a', 40)]
+    let walk = walkMessages(undefined, base, claudeAdapter)
+    const changed = edit(base)
+    walk = walkMessages(walk, changed, claudeAdapter)
+    sameAsFull(walk, changed)
+    const grown = [...changed, { role: 'user', text: 'more' }]
+    walk = walkMessages(walk, grown, claudeAdapter)
+    expect(name).toBe(name)
+    sameAsFull(walk, grown)
+  }
+})
+
+test('boundedJsonLength visits at most the budget of values however wide the object, ignored values included', () => {
+  let reads = 0
+  const target: Record<string, unknown> = {}
+  for (let i = 0; i < 500_000; i++) target['k' + i] = undefined
+  const wide = new Proxy(target, { get: (t, k) => { reads += 1; return t[k as string] } })
+  const t0 = performance.now()
+  boundedJsonLength(wide, 1000)
+  expect(reads).toBeLessThan(1100)
+  expect(performance.now() - t0).toBeLessThan(200)
+})
+
+test('an append to 5,000 messages whose calls carry 1,000-field arguments does not traverse the old arguments again', () => {
+  const big = (i: number): Msg => callMsg(`t${i}`, 'Bash', Object.fromEntries(Array.from({ length: 1000 }, (_, k) => ['f' + k, 'v' + k])))
+  const all: Msg[] = Array.from({ length: 5000 }, (_, i) => big(i))
+  let walk = walkMessages(undefined, all, claudeAdapter)
+  const times: number[] = []
+  for (let n = 0; n < 5; n++) {
+    all.push({ role: 'user', text: 'next' })
+    const t0 = performance.now()
+    walk = walkMessages(walk, all, claudeAdapter)
+    times.push(performance.now() - t0)
+  }
+  times.sort((a, b) => a - b)
+  expect(times[2]!).toBeLessThan(25)
+  sameAsFull(walk, all)
+})

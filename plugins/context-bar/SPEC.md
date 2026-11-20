@@ -63,16 +63,23 @@ These bound the work and the memory the plugin may use, however long the session
 | Refresh time | at most 25 ms at the 95th percentile for a refresh that adds a turn to a 5,000-message session (measured in the tests; the figure is a budget, not a promise for every machine) |
 | Messages walked in one full split | the latest 20,000; older ones are not read and the band marks the estimate with `≈`. Over this limit every refresh splits the whole retained window again; the "only new messages" rule does not apply there |
 | `/context-bar top` | reads the latest 20,000 messages, lists exactly 5 rows (equal sizes keep transcript order) and says how many older messages were not read |
-| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length. The size of a tool call's arguments is found by a bounded count (stops past 1 MiB, 100,000 values or 64 levels of nesting), never by building the whole text |
+| One command, one message | a Bash command over 1 MiB (1,048,576 characters) is not inspected: it counts as tool output by its length. The size of a tool call's arguments is found by a bounded count (stops past 1 MiB, 100,000 values or 64 levels of nesting; every property or element visited counts, ignored ones included, and a wide object is walked only as far as the budget), never by building the whole text. A message's signature reads at most 48 values of its arguments, once per argument object |
 | Trend history | at most 120 points per series, in memory only |
 
 ## Cache validity
 
-A refresh keeps, for each message already read, a small signature made from sizes (role, text length, how many calls and
-results, their text lengths). It adds only the new messages when every earlier signature is unchanged and the transcript did not
-get shorter. An edited message, a late result attached to an earlier message, a replaced branch of the same length and a
-compaction all change a signature or the length, so the transcript is split afresh. A change that keeps every size the same is
-not seen, and does not change the split, which is made from sizes.
+A refresh keeps, for each message already read, a signature: a hash of the role, the text size, and for each tool call its tool
+name, its id, the size of its arguments (counted over the first 48 values) and a hash of its command (its length and its first
+256 and last 128 characters); for each result its id and size. It adds only the new messages when every earlier signature is
+unchanged and the transcript did not get shorter. An edited message, a late result, a replaced branch, a changed tool, id or
+command class (for example `cat x` to `npm x`) and a compaction all change a signature or the length, so the transcript is
+split afresh.
+
+This is a bounded policy, not a guarantee that the incremental split always equals a full one. It does not notice a change in
+the 49th or later value of a call's arguments, a command that differs only between its first 256 and last 128 characters, or an
+argument object edited in place after the plugin first read it (the host normally hands over new objects). Checking those would
+mean reading every earlier argument again on every append. In those cases the band stays on the earlier figures until the next
+full split (`/context-bar r`, compaction, a new session, or any change that is noticed).
 
 ## What is kept in memory
 

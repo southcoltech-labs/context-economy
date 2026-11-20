@@ -206,3 +206,45 @@ describe('Pi converter and walk: malformed input, cache validity, retention', ()
     expect(newPiItemState().keepText).toBe(true) // /context-bar top keeps labels, for one call only
   })
 })
+
+describe('Pi cache validity covers classification, pairing and argument size', () => {
+  const call = (id: string, name: string, args: unknown) => ({ role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }] })
+  const result = (id: string, n: number) => ({ role: 'toolResult', toolCallId: id, toolName: 'bash', content: [{ type: 'text', text: 'r'.repeat(n) }] })
+  const matches = (walk: Walk<PiItemState>, all: unknown[]): void => {
+    const full = rawSplit(piItems(all))
+    for (const key of Object.keys(full) as (keyof typeof full)[]) expect(Math.abs(walk.raw[key] - full[key]) < 1e-6).toBe(true)
+  }
+  const cases: [string, unknown[]][] = [
+    ['cat to npm, same length', [call('a', 'bash', { command: 'npm x' }), result('a', 40)]],
+    ['argument growth', [call('a', 'bash', { command: 'echo a much longer command than before' }), result('a', 40)]],
+    ['tool change', [call('a', 'read', { command: 'cat x' }), result('a', 40)]],
+    ['equal-length id change', [call('b', 'bash', { command: 'cat x' }), result('a', 40)]],
+    ['role change', [{ ...call('a', 'bash', { command: 'cat x' }), role: 'user' }, result('a', 40)]],
+  ]
+  for (const [name, changed] of cases) {
+    test(`${name}: incremental equals a full split, also after an append`, () => {
+      const base = [call('a', 'bash', { command: 'cat x' }), result('a', 40)]
+      let walk = walkMessages(undefined, base, piAdapter)
+      walk = walkMessages(walk, changed, piAdapter)
+      matches(walk, changed)
+      const grown = [...changed, { role: 'user', content: 'more' }]
+      walk = walkMessages(walk, grown, piAdapter)
+      matches(walk, grown)
+    })
+  }
+
+  test('an append to 5,000 messages whose calls carry 1,000-field arguments does not traverse the old arguments again', () => {
+    const all: unknown[] = Array.from({ length: 5000 }, (_, i) => call(`t${i}`, 'bash', Object.fromEntries(Array.from({ length: 1000 }, (_, k) => ['f' + k, 'v' + k]))))
+    let walk = walkMessages(undefined, all, piAdapter)
+    const times: number[] = []
+    for (let n = 0; n < 5; n++) {
+      all.push({ role: 'user', content: 'next' })
+      const t0 = performance.now()
+      walk = walkMessages(walk, all, piAdapter)
+      times.push(performance.now() - t0)
+    }
+    times.sort((a, b) => a - b)
+    expect(times[2]!).toBeLessThan(25)
+    matches(walk, all)
+  })
+})

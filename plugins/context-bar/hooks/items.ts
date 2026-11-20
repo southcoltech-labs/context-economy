@@ -2,7 +2,7 @@
 
 import { commandIsRead } from './split'
 import type { MessageItem } from './split'
-import { boundedJsonLength, inspectable, mix } from './walk'
+import { argumentSignature, boundedJsonLength, hashText, inspectable, mix } from './walk'
 import type { Adapter } from './walk'
 
 type Rec = Record<string, unknown>
@@ -71,17 +71,23 @@ export const toItems = (messages: unknown, state: ItemState = newItemState()): M
   return items
 }
 
-/** Changes whenever a message's size-bearing parts change: role, text length, how many calls and results, and their text lengths. */
+/** Changes when what moves a message between rows changes: role, text length, each call's tool name, id, argument size and command, each result's id and size. */
 export const signature = (message: unknown): number => {
   if (!isRec(message)) return 0
-  let h = mix(17, (str(message.role) ?? '').length)
-  h = mix(h, (str(message.text) ?? '').length)
+  let h = mix(mix(17, hashText(message.role)), (str(message.text) ?? '').length)
   const uses = list(message.toolUses)
   h = mix(h, uses.length)
-  for (const use of uses) if (isRec(use)) h = mix(mix(h, (str(use.text) ?? '').length), (str(use.tool_use_id) ?? '').length)
+  for (const use of uses) {
+    if (!isRec(use)) { h = mix(h, -1); continue }
+    const input = isRec(use.input) ? use.input : undefined
+    h = mix(mix(mix(h, hashText(use.tool)), hashText(use.tool_use_id)), mix((str(use.text) ?? '').length, argumentSignature(use.input, input?.command)))
+  }
   const results = list(message.toolResults)
   h = mix(h, results.length)
-  for (const r of results) if (isRec(r)) h = mix(mix(h, (str(r.text) ?? '').length), (str(r.tool_use_id) ?? '').length)
+  for (const r of results) {
+    if (!isRec(r)) { h = mix(h, -1); continue }
+    h = mix(mix(h, (str(r.text) ?? '').length), hashText(r.tool_use_id))
+  }
   return h
 }
 

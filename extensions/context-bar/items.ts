@@ -2,7 +2,7 @@
 
 import { commandIsRead } from '../../plugins/context-bar/hooks/split'
 import type { MessageItem } from '../../plugins/context-bar/hooks/split'
-import { boundedJsonLength, inspectable, mix } from '../../plugins/context-bar/hooks/walk'
+import { argumentSignature, boundedJsonLength, hashText, inspectable, mix } from '../../plugins/context-bar/hooks/walk'
 import type { Adapter } from '../../plugins/context-bar/hooks/walk'
 
 type Rec = Record<string, unknown>
@@ -85,17 +85,21 @@ export const piItems = (messages: unknown, state: PiItemState = newPiItemState()
   return items
 }
 
-/** Changes whenever a message's size-bearing parts change: role, content size and block count, ids and summary or output size. */
+/** Changes when what moves a message between rows changes: role, content size and block count, each call's name, id, argument size and command, result ids and summary or output size. */
 export const piSignature = (m: unknown): number => {
   if (!isRec(m)) return 0
-  let h = mix(31, typeof m.role === 'string' ? m.role.length * 31 + m.role.charCodeAt(0) : 0)
+  let h = mix(31, hashText(m.role))
   h = mix(h, textChars(m.content))
   h = mix(h, Array.isArray(m.content) ? m.content.length : -1)
-  for (const b of blocksOf(m.content)) if (b.type === 'toolCall') h = mix(mix(h, typeof b.id === 'string' ? b.id.length : 0), boundedJsonLength(b.arguments))
-  h = mix(h, typeof m.toolCallId === 'string' ? m.toolCallId.length : 0)
+  for (const b of blocksOf(m.content)) {
+    if (b.type !== 'toolCall') continue
+    const args = isRec(b.arguments) ? b.arguments : undefined
+    h = mix(mix(mix(h, hashText(b.id)), hashText(b.name)), argumentSignature(b.arguments, args?.command))
+  }
+  h = mix(mix(h, hashText(m.toolCallId)), hashText(m.toolName))
   h = mix(h, textChars(m.summary))
   h = mix(h, typeof m.output === 'string' ? m.output.length : 0)
-  return mix(h, typeof m.command === 'string' ? m.command.length : 0)
+  return mix(h, hashText(m.command))
 }
 
 /** The walk's text-free converter: keeps only pairing metadata. */
