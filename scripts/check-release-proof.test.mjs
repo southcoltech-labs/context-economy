@@ -140,5 +140,5 @@ test("CLI: --pi with at least one extension is required", () => {
 test("the repository's own package.json names exactly the published Pi extension", async () => {
   const { readFileSync } = await import("node:fs");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.deepEqual(piExtensionNames(pkg), ["tool-gateway"]);
+  assert.deepEqual(piExtensionNames(pkg), ["tool-gateway", "context-bar"]);
 });

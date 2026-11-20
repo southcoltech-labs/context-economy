@@ -10,13 +10,15 @@ Include the plugin, its version (`.claude-plugin/plugin.json`), your OS, and ste
 ## What each plugin reads, writes and sends
 
 Public preview scope: the Claude Code plugin listed in `.claude-plugin/marketplace.json`, and the
-Pi extension listed in `package.json` (`pi.extensions`): tool-gateway on both hosts. Neither starts
+Pi extension listed in `package.json` (`pi.extensions`): tool-gateway and context-bar, each on both hosts. Neither starts
 a network connection or a model call of its own.
 
 | Plugin | Reads | Writes (where) | Runs | Plugin-initiated sends |
 | --- | --- | --- | --- | --- |
 | tool-gateway | Each tool call's name and size; Bash command text, to rewrite it; `~/.claude/context-economy/config.json` | A metadata-only ledger in `~/.claude/context-economy/gateway-ledger/` (session id, agent, tool name, tool-use id, rewrite status and reason code, byte counts, timings; never command text or output). The host sets its modes, typically `0755`/`0644`. Never pruned | The RTK you configure (`CE_RTK_BIN` or `rtk.path`), after a trust check by `/usr/bin/stat`, `/usr/bin/uname`, `/usr/bin/id` | None |
 | tool-gateway (Pi extension) | Each tool call's name and output size; `bash` command text, to rewrite it; `config.json` | A metadata-only ledger in `~/.claude/context-economy/gateway-ledger-pi/` (same fields as the Claude ledger), folder `0700`, files `0600`. Never pruned | The same configured RTK, after the same trust check | None |
+| context-bar | The host's token counts and message transcript (message sizes and tool names, never kept); on Pi, an optional `~/.config/context-bar/config.json` | Nothing. Its figures are kept in memory for the session and logged nowhere | Nothing | None |
+| context-bar (Pi extension) | The same counts and transcript from Pi; the optional config file | Nothing | Nothing | None |
 
 On Pi the extension also changes two host behaviours, and `CE_TOOL_GATEWAY=off` turns both off
 with the rest: it re-registers the built-in `edit` and `write` tools as sequential (same
@@ -28,11 +30,24 @@ it the process is killed and the rewrite is not used. The rewrite as a whole, re
 `config.json` included, gives up after 1.1 s, and a ledger write holds a tool result for at most
 0.5 s.
 
+### context-bar and your transcript
+
+context-bar reads the message transcript to size it and keeps only numbers: sums, token counts and timestamps for the trend,
+at most 120 points per series, in memory. It writes and logs nothing and starts no process or connection. `CE_CONTEXT_BAR=off`
+turns it off on both hosts (only the exact value `off`).
+
+Text from the transcript can appear in one place: `/context-bar top`, printed to you in the session. For a Bash result it shows
+at most one command name, never arguments, by a fixed rule: skip leading `NAME=value` words, take the next word's last path
+part, and show it only if it is 1 to 32 characters of letters, digits and `._+-` and is on a fixed list of common commands
+(`SHOWN_COMMANDS` in `plugins/context-bar/hooks/top.ts`). Anything else, including a URL, a path, an unknown word or quoted
+text, shows as `Bash`. A file read shows its path and a search shows its pattern, as the host gave them. A bad setting shows
+in the band as `n/a (...)`, never in a log.
+
 ### What stays on disk
 
 The gateway ledgers are never pruned; delete them yourself if you no longer need them. They can
 identify clients or workspaces by session and tool-use ids. Uninstalling keeps them and
-`config.json`.
+`config.json`. context-bar leaves nothing on disk.
 
 The Claude Code ledger gets the host's default modes, so other local users can read it unless
 `~/.claude/context-economy` is `0700`. To restrict it: `chmod 700 ~/.claude/context-economy`.
