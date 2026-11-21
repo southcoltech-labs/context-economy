@@ -1,0 +1,71 @@
+{
+  "version": "0.2.1",
+  "tag": "v0.2.1",
+  "candidate_sha": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455",
+  "runs": [
+    {
+      "platform": "macos-arm64",
+      "claude_code_version": "2.1.330 (Claude Code)",
+      "date": "2026-11-21",
+      "capture_id": "f1fdb968-eaa0-47da-97ad-cdc8ee8c10b9",
+      "plugins": {
+        "tool-gateway": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455",
+        "context-bar": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455"
+      },
+      "steps": {
+        "install": "pass",
+        "behavior": "pass",
+        "installed_commit": "pass",
+        "uninstall": "pass"
+      },
+      "result": "pass",
+      "pi": {
+        "pi_version": "1.5.0",
+        "installed_commit": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455",
+        "extensions": [
+          "tool-gateway",
+          "context-bar"
+        ],
+        "steps": {
+          "install": "pass",
+          "behavior": "pass",
+          "installed_commit": "pass",
+          "uninstall": "pass"
+        },
+        "result": "pass"
+      }
+    },
+    {
+      "platform": "linux-x86_64",
+      "claude_code_version": "2.1.330 (Claude Code)",
+      "date": "2026-11-21",
+      "capture_id": "33171f53-1f64-4f7f-904a-ea20c648e8cf",
+      "plugins": {
+        "tool-gateway": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455",
+        "context-bar": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455"
+      },
+      "steps": {
+        "install": "pass",
+        "behavior": "pass",
+        "installed_commit": "pass",
+        "uninstall": "pass"
+      },
+      "result": "pass",
+      "pi": {
+        "pi_version": "1.6.0",
+        "installed_commit": "366b1ac5d0e33fd31f6d0d5e534f2b94ea42b455",
+        "extensions": [
+          "tool-gateway",
+          "context-bar"
+        ],
+        "steps": {
+          "install": "pass",
+          "behavior": "pass",
+          "installed_commit": "pass",
+          "uninstall": "pass"
+        },
+        "result": "pass"
+      }
+    }
+  ]
+}
