@@ -9,6 +9,8 @@ const CONFIG = `${HOME}/.claude/context-economy/config.json`
 const LARGE_STDOUT = 'x'.repeat(8193)
 
 type RunResult = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated?: boolean }
+/** The host's `process.run` result always carries both truncation flags; the fake sets them false unless a test says otherwise. */
+const complete = (r: RunResult) => ({ isStdoutTruncated: false, isStderrTruncated: false, ...r })
 type FileId = {
   realPath: string; kind: string; uid: number; mode: number; dev: number; ino: number
   size: number; mtimeNs: string; ctimeNs: string
@@ -98,25 +100,25 @@ function setup(on: On, options: SetupOptions = {}) {
       await sleep(Math.min(ms, limit))
       return ms > limit
     }
-    if (e.argv[0] === '/usr/bin/uname') return { value: { exitCode: 0, stdout: 'Darwin\n', stderr: '' } }
-    if (e.argv[0] === '/usr/bin/id') return { value: { exitCode: 0, stdout: `${USER}\n`, stderr: '' } }
+    if (e.argv[0] === '/usr/bin/uname') return { value: complete({ exitCode: 0, stdout: 'Darwin\n', stderr: '' }) }
+    if (e.argv[0] === '/usr/bin/id') return { value: complete({ exitCode: 0, stdout: `${USER}\n`, stderr: '' }) }
     if (e.argv[0] === '/usr/bin/stat') {
       if (await took(mode.delayMs.stat)) return { deny: 'timed out' }
-      if (mode.stat === 'fail') return { value: { exitCode: 1, stdout: '', stderr: 'No such file' } }
+      if (mode.stat === 'fail') return { value: complete({ exitCode: 1, stdout: '', stderr: 'No such file' }) }
       if (mode.stat === 'hang') return { deny: 'timed out' }
-      if (mode.stat === 'garbage') return { value: { exitCode: 0, stdout: 'nope', stderr: '' } }
+      if (mode.stat === 'garbage') return { value: complete({ exitCode: 0, stdout: 'nope', stderr: '' }) }
       if (e.argv[3] !== file.current.realPath) return { deny: `stat of an unresolved path ${e.argv[3]}` }
-      return { value: { exitCode: 0, stdout: `${statLine(file.current)}\n`, stderr: '' } }
+      return { value: complete({ exitCode: 0, stdout: `${statLine(file.current)}\n`, stderr: '' }) }
     }
     if (e.argv[0] === file.current.realPath && e.argv[1] === '--version') {
       if (await took(mode.delayMs.version)) return { deny: 'timed out' }
       if (options.version === 'hang') return { deny: 'timed out' }
-      return { value: { exitCode: 0, stdout: options.version ?? 'rtk 0.47.0\n', stderr: '' } }
+      return { value: complete({ exitCode: 0, stdout: options.version ?? 'rtk 0.47.0\n', stderr: '' }) }
     }
     if (e.argv[0] === file.current.realPath && e.argv[1] === 'rewrite') {
       if (await took(mode.delayMs.rewrite)) return { deny: 'timed out' }
       if (options.rewrite === 'error') return { deny: 'rtk spawn failed' }
-      return { value: options.rewrite ?? { exitCode: 0, stdout: 'rtk ls', stderr: '' } }
+      return { value: complete(options.rewrite ?? { exitCode: 0, stdout: 'rtk ls', stderr: '' }) }
     }
     return { deny: `unexpected process: ${e.argv[0]}` }
   })

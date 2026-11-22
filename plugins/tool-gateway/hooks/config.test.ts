@@ -40,7 +40,9 @@ test("a thrown tool call is ledgered and rethrown", async ($, on) => {
 
   expect(didThrow).toBe(true);
   expect(writes).toHaveLength(1);
-  const row = JSON.parse(writes[0]) as Record<string, unknown>;
+  const first = writes[0];
+  expect(first).toBeDefined();
+  const row = JSON.parse(first ?? "{}") as Record<string, unknown>;
   expect(row.is_error).toBe(true);
   expect(row.admit).toBe("skipped");
   expect(row.admit_reason).toBe("tool_threw");
@@ -55,7 +57,7 @@ function installThrowingTool(on: On, writes: string[]): void {
   });
   on("process.run", (_, event) => {
     if (event.argv[0] === "rtk") {
-      return { value: { exitCode: 1, stdout: "", stderr: "" } };
+      return { value: { exitCode: 1, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
     }
     return { deny: "unexpected process" };
   });

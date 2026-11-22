@@ -59,9 +59,9 @@ for (const [name, hung] of [
     const trust = createTrust();
     const cfg = gatewayConfig({ home: "/tmp/home", flag: undefined, host: "pi" });
     const started = Date.now();
-    const r = await trustedRewrite({
-      ports: realHost(), cfg, trust, realPath: async () => BIN, envBin: () => BIN, readConfig: async () => undefined, ...hung,
-    }, "ls");
+    // Defaults first, then the one hung dependency: its entry replaces the default of the same name.
+    const defaults = { realPath: async () => BIN, envBin: () => BIN, readConfig: async () => undefined };
+    const r = await trustedRewrite({ ports: realHost(), cfg, trust, ...defaults, ...hung }, "ls");
     expect(Date.now() - started).toBeLessThan(1400);
     expect(r).toMatchObject({ command: "ls", status: "error", reason: "rewrite_budget" });
     await new Promise(r => setTimeout(r, 600));
