@@ -6,6 +6,10 @@ import { createTrust } from "./rtk-trust.ts";
 import { trustedRewrite } from "./trusted-rewrite.ts";
 import type { Ports } from "./types.ts";
 
+// Typecheck only, scoped to this module: the test runtime provides `setTimeout`, but the generated host declarations (es2023
+// only, no DOM or Node types) do not. Only this call shape is declared, and only here; production files stay without it.
+declare function setTimeout(callback: (...args: never[]) => void, ms?: number): unknown;
+
 const BIN = "/opt/rtk/bin/rtk";
 
 /** A host whose process timeout does not hold: `rewrite` answers successfully after `rewriteMs`. */

@@ -3,6 +3,10 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
+// Typecheck only, scoped to this module: the test runtime provides `setTimeout`, but the generated host declarations (es2023
+// only, no DOM or Node types) do not. Only this call shape is declared, and only here; production files stay without it.
+declare function setTimeout(callback: (...args: never[]) => void, ms?: number): unknown;
+
 const HOME = '/tmp/ce-tool-gateway-test'
 const HELPER = `${HOME}/.claude/context-economy/bin/ce-output-admit`
 const CONFIG = `${HOME}/.claude/context-economy/config.json`

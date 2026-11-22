@@ -49,6 +49,10 @@ The generated declarations are the host vendor's; keep them out of commits and o
 `claude plugin validate` reports TypeScript warnings of its own (for example TS5097 on `.ts` imports)
 that do not use the plugin's `tsconfig.json`; they do not fail validation.
 
+The gateway tests wait on real time with `setTimeout`, which the test runtime provides and the host
+declarations lack; the two test modules that need it declare that one call locally. Production code gets
+no such declaration, and `tests/production-globals.check.ts` makes `tsc` fail if one ever becomes global.
+
 The Pi extension declares the small part of Pi's API it
 uses as local structural types.
 
