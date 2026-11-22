@@ -143,6 +143,159 @@ describe('context-bar widget', () => {
     await s.handlers.session_start!({}, s.ctx)
     expect(s.lines()[0]).toContain('n/a')
   })
+  const compactionEntry = (tokensBefore: number, timestamp = new Date().toISOString()) => ({ type: 'compaction', timestamp, tokensBefore })
+  describe('unknown usage', () => {
+    test('with a compaction on record: n/a, why, and the known history; no current count', async () => {
+      const s = setup({ tokens: null, entries: [compactionEntry(118000)] })
+      await s.handlers.session_compact!({}, s.ctx)
+      const l = s.lines(100)
+      expect(l).toHaveLength(2)
+      expect(l[0]).toContain('usage is being recalculated after compaction')
+      expect(l[0]).not.toContain('n/a')
+      expect(l[1]).toContain('compacted 1× · just now · was 118k')
+      expect(l.join('\n')).not.toContain('of 100k')
+    })
+    test('multiple compactions: count and the latest tokensBefore', async () => {
+      const s = setup({ tokens: null, entries: [compactionEntry(90000, '2026-01-01T00:00:00Z'), { type: 'message' }, compactionEntry(70000)] })
+      await s.handlers.session_start!({}, s.ctx)
+      expect(s.lines(100)[1]).toContain('compacted 2× · just now · was 70k')
+    })
+    test('without any compaction: the bare n/a, unchanged', async () => {
+      const s = setup({ tokens: null, entries: [{ type: 'message' }] })
+      await s.handlers.session_start!({}, s.ctx)
+      expect(s.lines(100)).toHaveLength(1)
+    })
+    test('a measurement error is not relabelled as waiting', async () => {
+      const s = setup({ throws: true, entries: [compactionEntry(118000)] })
+      await s.handlers.session_start!({}, s.ctx)
+      const l = s.lines(100)
+      expect(l).toHaveLength(1)
+      expect(l[0]).toContain('n/a (usage broke)')
+    })
+    test('known usage returning replaces the explanation with the band', async () => {
+      const o = { tokens: null as number | null, entries: [compactionEntry(118000)] }
+      const s = setup(o)
+      await s.handlers.session_compact!({}, s.ctx)
+      expect(s.lines(100)).toHaveLength(2)
+      o.tokens = 21000
+      await s.handlers.agent_end!({}, s.ctx)
+      const l = s.lines(100)
+      expect(l[0]).toContain('21k of 100k')
+      expect(l.at(-1)).toContain('compacted 1× · just now · was 118k')
+      expect(l.join('\n')).not.toContain('recalculated')
+    })
+    test('narrow widths stay within bounds', async () => {
+      const s = setup({ tokens: null, entries: [compactionEntry(118000)] })
+      await s.handlers.session_start!({}, s.ctx)
+      for (const w of [1, 5, 10, 20, 40, 60, 100]) for (const line of s.lines(w)) expect(line.length).toBeLessThanOrEqual(w)
+      expect(s.lines(40)).toHaveLength(2)
+      expect(s.lines(100)[0]).not.toContain('n/a')
+    })
+    test('a malformed or throwing history stays within every width, with the error still shown where it fits', async () => {
+      const throwing = { type: 'compaction', get timestamp (): string { throw new Error('history unreadable') } }
+      for (const [name, entry, reason] of [['invalid timestamp', { type: 'compaction', timestamp: 'garbage' }, 'invalid compaction timestamp'], ['throwing getter', throwing, 'history unreadable']] as const) {
+        for (const tokens of [null, 20000]) {
+          const s = setup({ tokens, entries: [entry] })
+          await s.handlers.session_start!({}, s.ctx)
+          for (const w of [1, 5, 10, 20, 30, 40, 60, 80, 100]) {
+            const l = s.lines(w)
+            for (const line of l) expect(`${name} ${tokens} ${w} ${line.length <= w}`).toBe(`${name} ${tokens} ${w} true`)
+          }
+          expect(s.lines(100)[0]).toContain(`n/a (${reason})`)
+          expect(s.lines(10)[0]).toBe(`n/a (${reason})`.slice(0, 10))
+        }
+      }
+    })
+    test('a compaction-history failure is reported, not thrown', async () => {
+      const s = setup({ tokens: null, entries: [{ type: 'compaction', timestamp: 'garbage' }] })
+      await s.handlers.session_start!({}, s.ctx)
+      expect(s.lines(100)[0]).toContain('n/a (invalid compaction timestamp)')
+    })
+  })
+  describe('failed or aborted compaction', () => {
+    for (const [name, event] of [['error', { error: 'summarizer failed' }], ['abort', { aborted: true }]] as const) {
+      test(`${name}: re-measures, keeps earlier history, adds no compaction`, async () => {
+        const o = { tokens: 20000 as number | null, entries: [compactionEntry(118000)] }
+        const s = setup(o)
+        await s.handlers.session_start!({}, s.ctx)
+        const before = s.measurements()
+        o.tokens = 30000
+        await s.handlers.session_compact_failed!(event, s.ctx)
+        expect(s.measurements()).toBe(before + 1)
+        const l = s.lines(100)
+        expect(l[0]).toContain('30k of 100k')
+        expect(l.at(-1)).toContain('compacted 1× ')
+        expect(o.entries).toHaveLength(1)
+      })
+      test(`${name}: unknown usage after the failure is shown as unknown`, async () => {
+        const o = { tokens: 20000 as number | null }
+        const s = setup(o)
+        await s.handlers.session_start!({}, s.ctx)
+        o.tokens = null
+        await s.handlers.session_compact_failed!(event, s.ctx)
+        expect(s.lines(100)).toHaveLength(1)
+        expect(s.lines(100)[0]).toContain('n/a')
+      })
+    }
+    describe('freshness after hide, failure, show', () => {
+      const makeMessages = () => {
+        const args = { path: 'a' }
+        return { args, messages: [
+          { role: 'user', content: 'x'.repeat(4000) },
+          { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: args }] },
+          { role: 'toolResult', toolCallId: 'c1', toolName: 'read', content: [{ type: 'text', text: 'r'.repeat(4000) }] },
+        ] }
+      }
+      // The same call arguments edited in place after they were first read: a cached walk does not see this, a fresh split does.
+      const edit = (args: { path: string }) => { args.path = 'p'.repeat(6000) }
+      const fresh = async () => {
+        const m = makeMessages()
+        edit(m.args)
+        const s = setup({ messages: m.messages, labels: 'max' })
+        await s.handlers.session_start!({}, s.ctx)
+        return s.lines(100)
+      }
+      for (const event of ['session_compact_failed', 'session_compact'] as const) {
+        for (const payload of event === 'session_compact_failed' ? [{ error: 'x' }, { aborted: true }] : [{}]) {
+          test(`${event} ${JSON.stringify(payload)} while hidden: showing again splits afresh`, async () => {
+            const m = makeMessages()
+            const s = setup({ messages: m.messages, labels: 'max' })
+            await s.handlers.session_start!({}, s.ctx)
+            const before = s.lines(100)
+            await s.commands['context-bar']!.handler('', s.ctx) // hide
+            edit(m.args)
+            const reads = s.measurements()
+            await s.handlers[event]!(payload, s.ctx)
+            expect(s.measurements()).toBe(reads) // no hidden host read
+            expect(s.widgets['context-bar']).toBeUndefined()
+            await s.commands['context-bar']!.handler('', s.ctx) // show
+            const after = s.lines(100)
+            expect(after).not.toEqual(before)
+            expect(after).toEqual(await fresh())
+          })
+        }
+      }
+      test('control: without a failure event, hide then show keeps the cached split (documented bounded policy)', async () => {
+        const m = makeMessages()
+        const s = setup({ messages: m.messages, labels: 'max' })
+        await s.handlers.session_start!({}, s.ctx)
+        const before = s.lines(100)
+        await s.commands['context-bar']!.handler('', s.ctx)
+        edit(m.args)
+        await s.commands['context-bar']!.handler('', s.ctx)
+        expect(s.lines(100)).toEqual(before)
+      })
+    })
+    test('hidden: nothing is drawn or measured', async () => {
+      const s = setup()
+      await s.handlers.session_start!({}, s.ctx)
+      await s.commands['context-bar']!.handler('', s.ctx)
+      const before = s.measurements()
+      await s.handlers.session_compact_failed!({}, s.ctx)
+      expect(s.widgets['context-bar']).toBeUndefined()
+      expect(s.measurements()).toBe(before)
+    })
+  })
   test('a failure shows the error in the band and never throws into Pi', async () => {
     const s = setup({ throws: true })
     await s.handlers.session_start!({}, s.ctx)

@@ -23,6 +23,10 @@ export const BREAKDOWN_DETAIL: ContextBreakdownDetail = 'summary'
 
 export const HEADER = '◆ context'
 export const NOT_AVAILABLE = 'n/a'
+/** Shown instead of `n/a` when the host reports no usage but a compaction is on record. Says what is happening, with no promise of when usage returns. */
+export const USAGE_RECALC_NOTE = 'usage is being recalculated after compaction'
+/** The same message, longest first, for narrower windows: the longest that fits beside the title is used. */
+export const USAGE_RECALC_NOTES: readonly string[] = [USAGE_RECALC_NOTE, 'usage is being recalculated', 'recalculating usage', 'recalculating']
 export const COMPACT_LABEL = 'compacts at'
 export const COMPACT_OFF_LABEL = 'autocompact off'
 export const WINDOW_JOINER = 'of'
