@@ -191,6 +191,21 @@ describe('context-bar widget', () => {
       expect(s.lines(40)).toHaveLength(2)
       expect(s.lines(100)[0]).not.toContain('n/a')
     })
+    test('a malformed or throwing history stays within every width, with the error still shown where it fits', async () => {
+      const throwing = { type: 'compaction', get timestamp (): string { throw new Error('history unreadable') } }
+      for (const [name, entry, reason] of [['invalid timestamp', { type: 'compaction', timestamp: 'garbage' }, 'invalid compaction timestamp'], ['throwing getter', throwing, 'history unreadable']] as const) {
+        for (const tokens of [null, 20000]) {
+          const s = setup({ tokens, entries: [entry] })
+          await s.handlers.session_start!({}, s.ctx)
+          for (const w of [1, 5, 10, 20, 30, 40, 60, 80, 100]) {
+            const l = s.lines(w)
+            for (const line of l) expect(`${name} ${tokens} ${w} ${line.length <= w}`).toBe(`${name} ${tokens} ${w} true`)
+          }
+          expect(s.lines(100)[0]).toContain(`n/a (${reason})`)
+          expect(s.lines(10)[0]).toBe(`n/a (${reason})`.slice(0, 10))
+        }
+      }
+    })
     test('a compaction-history failure is reported, not thrown', async () => {
       const s = setup({ tokens: null, entries: [{ type: 'compaction', timestamp: 'garbage' }] })
       await s.handlers.session_start!({}, s.ctx)
@@ -222,6 +237,55 @@ describe('context-bar widget', () => {
         expect(s.lines(100)[0]).toContain('n/a')
       })
     }
+    describe('freshness after hide, failure, show', () => {
+      const makeMessages = () => {
+        const args = { path: 'a' }
+        return { args, messages: [
+          { role: 'user', content: 'x'.repeat(4000) },
+          { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: args }] },
+          { role: 'toolResult', toolCallId: 'c1', toolName: 'read', content: [{ type: 'text', text: 'r'.repeat(4000) }] },
+        ] }
+      }
+      // The same call arguments edited in place after they were first read: a cached walk does not see this, a fresh split does.
+      const edit = (args: { path: string }) => { args.path = 'p'.repeat(6000) }
+      const fresh = async () => {
+        const m = makeMessages()
+        edit(m.args)
+        const s = setup({ messages: m.messages, labels: 'max' })
+        await s.handlers.session_start!({}, s.ctx)
+        return s.lines(100)
+      }
+      for (const event of ['session_compact_failed', 'session_compact'] as const) {
+        for (const payload of event === 'session_compact_failed' ? [{ error: 'x' }, { aborted: true }] : [{}]) {
+          test(`${event} ${JSON.stringify(payload)} while hidden: showing again splits afresh`, async () => {
+            const m = makeMessages()
+            const s = setup({ messages: m.messages, labels: 'max' })
+            await s.handlers.session_start!({}, s.ctx)
+            const before = s.lines(100)
+            await s.commands['context-bar']!.handler('', s.ctx) // hide
+            edit(m.args)
+            const reads = s.measurements()
+            await s.handlers[event]!(payload, s.ctx)
+            expect(s.measurements()).toBe(reads) // no hidden host read
+            expect(s.widgets['context-bar']).toBeUndefined()
+            await s.commands['context-bar']!.handler('', s.ctx) // show
+            const after = s.lines(100)
+            expect(after).not.toEqual(before)
+            expect(after).toEqual(await fresh())
+          })
+        }
+      }
+      test('control: without a failure event, hide then show keeps the cached split (documented bounded policy)', async () => {
+        const m = makeMessages()
+        const s = setup({ messages: m.messages, labels: 'max' })
+        await s.handlers.session_start!({}, s.ctx)
+        const before = s.lines(100)
+        await s.commands['context-bar']!.handler('', s.ctx)
+        edit(m.args)
+        await s.commands['context-bar']!.handler('', s.ctx)
+        expect(s.lines(100)).toEqual(before)
+      })
+    })
     test('hidden: nothing is drawn or measured', async () => {
       const s = setup()
       await s.handlers.session_start!({}, s.ctx)

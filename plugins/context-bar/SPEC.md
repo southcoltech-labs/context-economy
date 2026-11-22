@@ -19,7 +19,7 @@ Claude Code plugin and the Pi extension (`extensions/context-bar`).
 | Entry | `hooks/register.tsx` | `extensions/context-bar/index.ts` |
 | Total and fixed rows | the engine's own breakdown (`summary` detail) | `ctx.getContextUsage()`, plus sizes of the system prompt and active tool declarations |
 | Messages split | estimated from character counts | the same estimate |
-| Refresh | on `refreshGrowthPercent` growth, after compaction, `/context-bar r` | after every round, after compaction, `/context-bar r` |
+| Refresh | on `refreshGrowthPercent` growth, after compaction, `/context-bar r` | after every round (`agent_end`), after compaction, after a failed or aborted compaction, `/context-bar r` |
 | Trend (expanded band) | yes | no |
 | Settings | plugin options | `~/.config/context-bar/config.json` |
 
@@ -94,6 +94,27 @@ while building the list, and drops it.
 The split of the messages row describes the messages that were read: the latest 20,000 at most, and only messages with a
 role the plugin knows. Its proportions may differ from the full history's. The total is always the host's, unchanged, and the
 band marks the estimate (`≈`, or `distribution est.`).
+
+## Unknown usage and compaction events (Pi)
+
+Pi reports no usage (`tokens: null`) right after a compaction, until a later assistant reply has usable usage. The band has no
+total to draw then. It shows exactly one of these states, in this priority:
+
+1. **A measurement or configuration error:** the header reads `n/a (<reason>)`, as in Malformed input. Compaction history is not read and the state is never relabelled as waiting.
+2. **Unknown usage, with a compaction on record:** the header's right side reads `usage is being recalculated after compaction`, and the next line is the compaction history of the latest recorded compaction (`compacted N× · <age> · was <tokens>`), N counting all of them. No bar, legend or distribution is drawn, and no count from before the compaction is shown as the current one. The message makes no promise of when usage returns.
+3. **Unknown usage, with no compaction on record:** the header reads `n/a`, as before.
+
+In state 2 the message is the longest of `usage is being recalculated after compaction`, `usage is being recalculated`, `recalculating usage` and `recalculating` that fits in the header beside the title (the header needs the title, one space and the text: 54, 37, 29 and 23 columns). Narrower than 23 columns the header is the title alone. The message never moves to its own line. The history line is clipped to the width, not hidden.
+
+When usage is known, the band is drawn as usual; the compaction history is then the right side of the `distribution est.` footer, hidden when it cannot fit beside the note (never wrapped).
+
+If reading the compaction history fails (a malformed timestamp, a throwing entry), an `n/a (<reason>)` line is added above the band, clipped to the width. It is shown with known usage too.
+
+**Refresh and invalidation.** The refresh policy is unchanged: Pi refreshes on `session_start`, `agent_end`, `session_compact`, `session_compact_failed` and `model_select`, and on `/context-bar r`. Nothing refreshes on `turn_end` or per message. A compaction that fails or is aborted (`session_compact_failed`) re-measures through the same guarded path and drops the walk, because the transcript may have been rewritten. It adds no compaction entry and keeps the history already recorded. The walk is also dropped on `session_start`, `session_compact` and `session_compact_failed` while the band is hidden (nothing is read from the host and nothing is drawn), so showing it again splits afresh and does not reuse the cached sizes of arguments (see Cache validity).
+
+## Supported width
+
+The band supports terminal widths of 60 columns and up. Below that it degrades and is not guaranteed legible: the header's right side shortens or drops (the title alone), and no line is wider than the window. The host chooses the width. Where a footer shows compaction history beside the `distribution est.` note, it is hidden when both do not fit; in the unknown-usage state above the history has its own line and is clipped.
 
 ## Malformed input
 

@@ -98,9 +98,11 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
   }
 
   const show = (event: RefreshEvent, ctx: BarCtx): void => {
+    // The transcript is new, was rewritten, or a rewrite was attempted and may have left it changed: drop the walk even while the band
+    // is hidden or has no UI (no host read or drawing), so showing it again splits afresh.
+    if (event === 'start' || event === 'compact' || event === 'compactFailed') walk = undefined
     if (!ctx.hasUI) return
     if (!isEnabled) return ctx.ui.setWidget(WIDGET_KEY, undefined)
-    if (event === 'start' || event === 'compact' || event === 'compactFailed') walk = undefined // the transcript is new, was rewritten, or a rewrite was attempted and may have left it changed
     update(event, ctx)
     if (tui) return tui.requestRender()
     ctx.ui.setWidget(WIDGET_KEY, t => {
@@ -123,7 +125,7 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
             } catch (cause) { failure = messageOf(cause) }
           }
           const lines = renderLines(view, error, width, prefix(), override ?? configLevel, palette, compaction)
-          if (failure !== undefined) lines.unshift(`n/a (${failure})`)
+          if (failure !== undefined) lines.unshift(`n/a (${failure})`.slice(0, Math.max(1, width))) // bounded like every other line
           return lines
         },
         invalidate: () => {},
