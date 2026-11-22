@@ -51,7 +51,9 @@ test("keeps JSONL segments bounded and writes only schema fields", async () => {
   expect(entries[1]).toHaveLength(1);
   expect(JSON.stringify(entries)).not.toContain("secret command");
   expect(JSON.stringify(entries)).not.toContain("secret output");
-  expect(JSON.parse(entries[0][0])).toEqual(row(0));
+  const firstRow = entries[0]?.[0];
+  expect(firstRow).toBeDefined();
+  expect(JSON.parse(firstRow ?? "{}")).toEqual(row(0));
 });
 
 test("a filesystem failure is reported once and never rejects", async () => {

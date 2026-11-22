@@ -42,7 +42,18 @@ claude --plugin-dir "$PWD/plugins/$PLUGIN"       # start it once, then quit
 npx -p typescript tsc -p "plugins/$PLUGIN" --noEmit
 ```
 
-The generated folder is ignored by git. The Pi extension declares the small part of Pi's API it
+The generated folder is ignored by git. The typecheck is a local requirement: CI does not run `tsc`,
+because the declarations come from a logged-in Claude Code session and CI holds no login. Run it
+with the host version pinned in the toolchain table above before a change to a plugin's code or tests.
+The generated declarations are the host vendor's; keep them out of commits and out of shared logs.
+`claude plugin validate` reports TypeScript warnings of its own (for example TS5097 on `.ts` imports)
+that do not use the plugin's `tsconfig.json`; they do not fail validation.
+
+The gateway tests wait on real time with `setTimeout`, which the test runtime provides and the host
+declarations lack; the two test modules that need it declare that one call locally. Production code gets
+no such declaration, and `tests/production-globals.check.ts` makes `tsc` fail if one ever becomes global.
+
+The Pi extension declares the small part of Pi's API it
 uses as local structural types.
 
 ## Making a change
