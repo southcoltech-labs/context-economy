@@ -1,5 +1,12 @@
 # context-economy
 
+## 0.2.2
+
+### Patch Changes
+
+- 78c8486: tool-gateway developer tooling: the documented `tsc -p plugins/tool-gateway --noEmit` now passes (it failed with 30 to 32 errors). The plugin's `tsconfig.json` allows the `.ts` import extensions its sources already use, and its tests are corrected to match the host's declared types (complete `process.run` results, checked array reads, one declared test timer). No runtime or plugin behaviour change. CONTRIBUTING states that CI does not run the typecheck.
+- dc6d904: context-bar on Pi: when Pi reports no usage after a compaction, the header now reads `usage is being recalculated after compaction` (shorter in narrow windows) in place of the bare `n/a`, and the line below keeps the compaction history (`compacted 1× · just now · was 118k`), so the band no longer looks as if it stopped. No bar or distribution is drawn then, and a pre-compaction count is never shown as current. A measurement error, or unknown usage with no compaction on record, still reads `n/a`. The refresh stays on `agent_end`. A failed or aborted compaction (`session_compact_failed`) now re-measures through the guarded refresh and drops the cached split, also while the band is hidden. A failure reading the compaction history is clipped to the window width. Supported terminal width (60 columns and up) is documented; the Claude Code band is unchanged.
+
 ## 0.2.1
 
 ### Patch Changes
