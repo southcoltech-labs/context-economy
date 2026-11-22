@@ -22,8 +22,9 @@ export const ESTIMATE_NOTE = 'distribution est.'
 export const ESTIMATE_NOTE_PARTIAL = '≈ distribution est., latest messages'
 export const MEMORY_TAGS: readonly string[] = ['addendum', 'project_context']
 export const SKILLS_TAGS: readonly string[] = ['skills']
-export const REFRESH_EVENTS: Readonly<Record<string, 'start' | 'round' | 'compact' | 'manual' | 'model'>> = {
-  session_start: 'start', agent_end: 'round', session_compact: 'compact', model_select: 'model',
+export type RefreshEvent = 'start' | 'round' | 'compact' | 'compactFailed' | 'manual' | 'model'
+export const REFRESH_EVENTS: Readonly<Record<string, RefreshEvent>> = {
+  session_start: 'start', agent_end: 'round', session_compact: 'compact', session_compact_failed: 'compactFailed', model_select: 'model',
 }
 export const BAR_CONFIG_PATH = join(homedir(), '.config', 'context-bar', 'config.json')
 /** `offloadAtTokens` is optional and off by default: when set, the marker shows that token count instead of Pi's compaction point. */

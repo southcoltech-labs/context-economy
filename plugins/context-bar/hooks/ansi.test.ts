@@ -56,6 +56,43 @@ describe('renderLines', () => {
     expect(plain(renderLines(null, null, 40, '', 'max', PALETTES.dark)[0]!)).toContain('n/a')
     expect(plain(renderLines(null, 'boom', 40, '', 'max', PALETTES.dark)[0]!)).toContain('n/a (boom)')
   })
+  describe('unknown usage with compaction history', () => {
+    const history = 'compacted 1× · 5m ago · was 50k'
+    const render = (width: number, error: string | null = null, compaction = history) => renderLines(null, error, width, '', 'max', PALETTES.dark, compaction).map(plain)
+    test('wide: the explanation sits in the header, the history below, no n/a', () => {
+      const l = render(80)
+      expect(l).toHaveLength(2)
+      expect(l[0]).toContain('usage is being recalculated after compaction')
+      expect(l[0]).not.toContain('n/a')
+      expect(l[0]!.length).toBe(80)
+      expect(l[1]).toBe(history)
+    })
+    test('narrower: a shorter message stays in the header, never on its own line', () => {
+      const cases: [number, string][] = [[54, 'usage is being recalculated after compaction'], [53, 'usage is being recalculated'], [37, 'usage is being recalculated'], [36, 'recalculating usage'], [29, 'recalculating usage'], [28, 'recalculating'], [23, 'recalculating'], [22, '']]
+      for (const [width, text] of cases) {
+        const l = render(width)
+        expect(l).toHaveLength(2)
+        expect(l[0]!.length).toBeLessThanOrEqual(width)
+        expect(l[0]).toContain(text)
+        expect(l[0]).not.toContain('n/a')
+        expect(l[1]).toBe(history.slice(0, width))
+      }
+    })
+    test('every line stays within the width, down to one column', () => {
+      for (const width of [1, 3, 9, 10, 20, 22, 23, 29, 31, 32, 37, 40, 53, 54, 60, 64, 65, 80]) for (const line of render(width)) expect(line.length).toBeLessThanOrEqual(width)
+    })
+    test('no compaction, or an error: the unchanged single line', () => {
+      expect(render(80, null, '')).toHaveLength(1)
+      expect(render(80, 'boom')).toHaveLength(1)
+      expect(render(80, 'boom')[0]).toContain('n/a (boom)')
+      expect(render(80, 'boom')).toEqual(render(80, 'boom', ''))
+    })
+    test('a present view ignores the unknown-usage branch', () => {
+      const l = renderLines(view, null, 80, 'distribution est.', 'max', PALETTES.dark, history).map(plain)
+      expect(l.join('\n')).not.toContain('recalculated')
+      expect(l.at(-1)).toContain(history)
+    })
+  })
   test('colours use 24-bit ANSI', () => {
     expect(renderLines(view, null, 100, '', 'max', PALETTES.dark)[1]).toContain('\x1b[38;2;')
   })

@@ -64,6 +64,11 @@ macOS on Apple silicon and Linux x86_64, with the host and RTK versions in the
 [README](README.md#supported-environment). Windows is not supported. A change to a supported
 version goes through the release checks again.
 
+The context-bar band supports terminal widths of 60 columns and up. Below that it degrades (a shorter
+or title-only header, compaction text hidden, never wrapped past the width) and is not guaranteed
+legible. Visual checks and renderer tests cover 60 columns and up; narrower widths are checked only
+for staying within the width.
+
 ## License
 
 By contributing, you agree that your contribution is licensed under the

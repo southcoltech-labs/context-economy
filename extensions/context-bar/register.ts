@@ -13,7 +13,7 @@ import { renderLines } from '../../plugins/context-bar/hooks/ansi'
 import type { RefreshState } from '../../plugins/context-bar/hooks/refresh'
 import { applySplit } from '../../plugins/context-bar/hooks/split'
 import { barPalette } from './config'
-import type { BarConfig } from './config'
+import type { BarConfig, RefreshEvent } from './config'
 import { PALETTES, UNKNOWN_HOST_THEME } from '../../plugins/context-bar/hooks/palettes'
 import type { Palette } from '../../plugins/context-bar/hooks/palettes'
 import { piAdapter, piItems } from './items'
@@ -100,7 +100,7 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
   const show = (event: RefreshEvent, ctx: BarCtx): void => {
     if (!ctx.hasUI) return
     if (!isEnabled) return ctx.ui.setWidget(WIDGET_KEY, undefined)
-    if (event === 'start' || event === 'compact') walk = undefined // the transcript is new or was rewritten
+    if (event === 'start' || event === 'compact' || event === 'compactFailed') walk = undefined // the transcript is new, was rewritten, or a rewrite was attempted and may have left it changed
     update(event, ctx)
     if (tui) return tui.requestRender()
     ctx.ui.setWidget(WIDGET_KEY, t => {
@@ -110,7 +110,7 @@ export const registerContextBar = (pi: Pi, deps: BarDeps): void => {
         render: (width: number) => {
           let compaction = ''
           let failure: string | undefined
-          if (view) {
+          if (error === null) { // a measurement error already explains the band; known compaction history is read otherwise, even with no usage
             try {
               const entries = ctx.sessionManager.getEntries()
               const compacted = entries.filter(entry => entry.type === 'compaction')

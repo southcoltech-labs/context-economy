@@ -31,6 +31,7 @@ It starts no network connection or model call of its own. See [SECURITY.md](SECU
 | --- | --- |
 | OS | macOS on Apple silicon (arm64), Linux x86_64. Windows is not supported |
 | Hosts | Claude Code or Pi, or both, installed before you start. Each release's notes list the versions it was tested with; `v0.1.2`: Claude Code 2.1.323 and 2.1.325, Pi 1.5.0 and 1.5.2 |
+| Terminal width (context-bar) | 60 columns or more. Narrower windows shorten or drop text (a title-only header, no compaction text) and are not guaranteed legible |
 | RTK | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 0.47.0 or later, below 1.0.0, at an absolute path you name |
 
 ## 1. Configure RTK
