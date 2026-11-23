@@ -40,7 +40,11 @@ function host(name) {
   if (w.descendantsKilled) problems.push('descendants outlived the host')
   if (!Array.isArray(w.problems) || w.problems.length) problems.push('wrapper reported problems')
   if (!isObj(w.record)) problems.push('no record')
-  else for (const p of validateRecord(w.record, name)) problems.push(`record: ${p}`)
+  else {
+    for (const p of validateRecord(w.record, name)) problems.push(`record: ${p}`)
+    if (w.record.valid !== true) problems.push('record.valid is not true')
+    if (w.record.complete !== true) problems.push('record.complete is not true')
+  }
   return { name, status: typeof w.status === 'string' ? w.status : 'unknown', problems, raw: raw.length > MAX_RAW ? raw.slice(0, 2000) : raw, rawLength: raw.length, rawComplete: raw.length <= MAX_RAW, record: isObj(w.record) ? w.record : undefined, elapsedMs: w.elapsedMs, cleanup: w.cleanup, admissible: problems.length === 0 }
 }
 
@@ -70,9 +74,9 @@ out.push('| part | status | elapsed ms | cleanup | problems |', '|---|---|---|--
 out.push(`| metadata | ${mProblems.length ? '**invalid**' : 'ok'} | | | ${mProblems.join('; ')} |`)
 for (const h of hosts) out.push(`| ${h.name} | **${h.status}**${h.admissible ? '' : ' (not admissible)'} | ${h.elapsedMs ?? 'n/a'} | ${h.cleanup ?? 'n/a'} | ${h.problems.join('; ')} |`)
 for (const h of hosts) {
-  if (!h.record?.pairs?.length) continue
+  if (!Array.isArray(h.record?.pairs) || !h.record.pairs.some(isObj)) continue
   out.push('', `### ${h.name}: per pair (ms; ratios are exploratory)`, '', '| pair | order | append p95 | append median | warm full median | ratio p95/med | ratio med/med | cold | state |', '|---|---|---|---|---|---|---|---|---|')
-  for (const p of h.record.pairs) out.push(`| ${p.pair} | ${p.order} | ${f(p.appendP95)} | ${f(p.appendMedian)} | ${f(p.warmFullMedian)} | ${f(p.ratioP95OverWarmMedian)} | ${f(p.ratioMedianOverWarmMedian)} | ${f(p.cold?.ms)} | ${p.appendDone && p.fullDone ? 'complete' : 'partial'} |`)
+  for (const p of h.record.pairs.filter(isObj)) out.push(`| ${p.pair} | ${p.order} | ${f(p.appendP95)} | ${f(p.appendMedian)} | ${f(p.warmFullMedian)} | ${f(p.ratioP95OverWarmMedian)} | ${f(p.ratioMedianOverWarmMedian)} | ${f(p.cold?.ms)} | ${p.appendDone && p.fullDone ? 'complete' : 'partial'} |`)
 }
 // Raw evidence, whole. A shortened diagnostic is labelled as such and is never presented as the complete record.
 out.push('', '### Retained raw evidence', '')

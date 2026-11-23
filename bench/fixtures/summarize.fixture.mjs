@@ -68,6 +68,9 @@ test('status-only, wrong-host, swapped, inconsistent and unclean host results ar
     'truncated': { 'pi.out': line(wrapper('pi', { truncated: { stdout: true, stderr: false } })) },
     'wrapper problems': { 'pi.out': line(wrapper('pi', { problems: ['x'] })) },
     'descendants killed': { 'pi.out': line(wrapper('pi', { descendantsKilled: true })) },
+    'record valid false': { 'pi.out': line(wrapper('pi', { record: { ...goodRecord('pi'), valid: false } })) },
+    'record complete false': { 'pi.out': line(wrapper('pi', { record: { ...goodRecord('pi'), complete: false } })) },
+    'record flags missing': { 'pi.out': line(wrapper('pi', { record: (() => { const r = goodRecord('pi'); delete r.valid; delete r.complete; return r })() })) },
     'wrapper status timeout': { 'pi.out': line(wrapper('pi', { status: 'timeout' })) },
     'duplicate lines': { 'claude.out': line(wrapper('claude')) + line(wrapper('claude')) },
     'malformed json': { 'claude.out': 'APPEND-RUN-JSON {not json\n' },
@@ -107,4 +110,13 @@ test('the report is appended to the job summary file by the script itself, compl
   assert.equal(r.code, 0); assert.equal(readFileSync(sum, 'utf8'), r.out)
   const bad = await run(GOOD(), { GITHUB_STEP_SUMMARY: join(tmpdir(), 'no-such-dir-xyz', 'summary.md') })
   assert.equal(bad.code, 1)
+})
+
+test('malformed pairs never crash the report: it still ends with the sentinel', async () => {
+  for (const pairs of [[null], [1, 'x', null, []], 'nope', [], undefined]) {
+    const r = await run({ ...GOOD(), 'pi.out': line(wrapper('pi', { record: { ...goodRecord('pi'), pairs } })) })
+    assert.equal(r.code, 1, JSON.stringify(pairs)); assert.equal(r.ended, 'not-admissible', JSON.stringify(pairs))
+  }
+  const r = await run({ ...GOOD(), 'pi.out': line(wrapper('pi', { record: { ...goodRecord('pi'), pairs: [null, ...goodRecord('pi').pairs.slice(1)] } })) })
+  assert.equal(r.ended, 'not-admissible')
 })
