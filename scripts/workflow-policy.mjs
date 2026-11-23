@@ -34,6 +34,14 @@ export const ENFORCING = [
 /** The one advisory ci.yml job (bench/README.md): a leaf after the official matrices that must keep running when they fail. */
 export const ADVISORY = { id: "append-measurement", condition: "${{ !cancelled() }}" };
 
+/** The advisory job's measurement steps, each with its exact command: every one must exist and carry the advisory condition. */
+export const ADVISORY_STEPS = [
+  ["Runner metadata", 'node bench/runner-meta.mjs > "$RUNNER_TEMP/meta.json"'],
+  ["Claude append measurement", 'node bench/run.mjs claude --deadline-ms 240000 > "$RUNNER_TEMP/claude.out"'],
+  ["Pi append measurement", 'node bench/run.mjs pi --deadline-ms 240000 > "$RUNNER_TEMP/pi.out"'],
+  ["Report", 'node bench/summarize.mjs "$RUNNER_TEMP"'],
+];
+
 export const CODEOWNERS = "* @southcoltech-labs/maintainers";
 
 /**
@@ -119,6 +127,12 @@ export function workflowProblems(workflows, codeowners) {
     const mins = Number(adv.match(/^ {4}timeout-minutes: (\d+)\s*$/m)?.[1]);
     if (!(mins >= 1 && mins <= 20)) fail(`ci.yml ${ADVISORY.id}`, "needs timeout-minutes from 1 to 20");
     if (/\|\|\s*(true|:)/.test(adv)) fail(`ci.yml ${ADVISORY.id}`, "a command's failure is swallowed (|| true)");
+    for (const [name, cmd] of ADVISORY_STEPS) {
+      const step = steps(adv).find((x) => x.includes(`name: ${name}\n`));
+      if (!step) { fail(`ci.yml ${ADVISORY.id}`, `no step "${name}"`); continue; }
+      if (step.match(/^ {8}run: (.*?)\s*$/m)?.[1] !== cmd) fail(`ci.yml ${ADVISORY.id}`, `step "${name}" must run exactly: ${cmd}`);
+      if (step.match(/^ {8}if: (.+?)\s*$/m)?.[1] !== ADVISORY.condition) fail(`ci.yml ${ADVISORY.id}`, `step "${name}" must carry the condition ${ADVISORY.condition}`);
+    }
     for (const step of steps(adv)) {
       const cond2 = step.match(/^ {8}if: (.+?)\s*$/m)?.[1];
       if (cond2 !== undefined && cond2 !== ADVISORY.condition) fail(`ci.yml ${ADVISORY.id}`, `step condition ${cond2} is not ${ADVISORY.condition}`);

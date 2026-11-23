@@ -154,4 +154,4 @@ jobs:
         run: node bench/run.mjs pi --deadline-ms 240000 > "$RUNNER_TEMP/pi.out"
       - name: Report
         if: ${{ !cancelled() }}
-        run: node bench/summarize.mjs "$RUNNER_TEMP" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: node bench/summarize.mjs "$RUNNER_TEMP" # appends to the job summary itself; a pipe would hide its exit status
