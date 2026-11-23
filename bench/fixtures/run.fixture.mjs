@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Failure fixtures for the bounded runner, with real stand-in child processes. Run explicitly: `node --test bench/fixtures/run.test.mjs`.
+// Failure fixtures for the bounded runner, with real stand-in child processes. Run explicitly: `node --test bench/fixtures/run.fixture.mjs`.
 import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseDeadline, validateRecord } from '../run-lib.mjs'
+import { goodRecord, printRecord } from './helpers.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const driver = join(here, 'driver.mjs')
@@ -17,34 +18,17 @@ const child = (name, src) => { const p = join(dir, name); writeFileSync(p, src);
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
 const groupAlive = (pid) => { try { process.kill(-pid, 0); return true } catch { return false } }
 
-const sorted = (xs) => [...xs].sort((a, b) => a - b)
-const median = (xs) => { const s = sorted(xs); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2 }
-const p95 = (xs) => sorted(xs)[Math.ceil(xs.length * 0.95) - 1]
-export const goodRecord = (host = 'pi') => ({
-  schema: 1, host, kind: 'append-measurement', valid: true, complete: true, stage: 'done', invalidReasons: [], warnings: [],
-  config: { base: 5000, appends: 40, warmWalks: 5, orders: ['append-first', 'full-first', 'full-first', 'append-first'] },
-  pairs: ['append-first', 'full-first', 'full-first', 'append-first'].map((order, pair) => {
-    const appendMs = Array.from({ length: 40 }, (_, i) => 1 + i / 100), warmFullMs = [300, 301, 302, 303, 304]
-    return {
-      pair, order, equal: true, appendDone: true, fullDone: true, stateSizes: { appendStart: 5000, appendEnd: 5040, fullWalk: 5040 }, appendMs, warmFullMs,
-      appendP95: p95(appendMs), appendMedian: median(appendMs), warmFullMedian: median(warmFullMs),
-      ratioP95OverWarmMedian: p95(appendMs) / median(warmFullMs), ratioMedianOverWarmMedian: median(appendMs) / median(warmFullMs),
-      cold: { ms: 400, messages: 5040, shapeMatchesWarm: true },
-    }
-  }),
-  elapsedMs: 1000,
-})
-const printRecord = (r) => `console.log('APPEND-MEASURE-JSON ' + JSON.stringify(${JSON.stringify(r)}))`
 
 // Runs the driver with stdout captured through a pipe (not a terminal). Optionally signals it after `signalAfterMs`.
 const drive = (env, { signal, signalAfterMs = 600 } = {}) => new Promise((resolve) => {
   const d = spawn(process.execPath, [driver], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
-  let out = ''
+  let out = '', errOut = ''
   d.stdout.on('data', (c) => { out += c })
+  d.stderr.on('data', (c) => { errOut += c })
   if (signal) setTimeout(() => d.kill(signal), signalAfterMs)
   d.on('close', (code, sig) => {
     const line = out.split('\n').find((l) => l.startsWith('APPEND-RUN-JSON '))
-    resolve({ code, sig, out, report: line ? JSON.parse(line.slice('APPEND-RUN-JSON '.length)) : undefined })
+    resolve({ code, sig, out, errOut, report: line ? JSON.parse(line.slice('APPEND-RUN-JSON '.length)) : undefined })
   })
 })
 
@@ -116,6 +100,9 @@ test('timeout with a partial record is never valid and keeps the partial record 
 test('startup failure, no record, duplicate records and a wrong host are all invalid', async () => {
   let r = await drive({ DRV_CMD: join(dir, 'no-such-binary'), DRV_CHILD: '' })
   assert.equal(r.report.status, 'startup-failure'); assert.equal(r.code, 1)
+  assert.ok(r.report.reason.includes('ENOENT'), r.report.reason); assert.equal(r.report.cleanup, 'clean')
+  assert.equal(r.out.split('\n').filter((l) => l.startsWith('APPEND-RUN-JSON ')).length, 1)
+  assert.ok(!/Unhandled|node:events|ERR_UNHANDLED/.test(r.errOut), 'no unhandled error stack: ' + r.errOut.slice(0, 200))
   r = await drive({ DRV_CHILD: child('none.cjs', 'console.log("hello")') })
   assert.equal(r.report.status, 'no-record')
   r = await drive({ DRV_CHILD: child('dup.cjs', printRecord(goodRecord()) + ';' + printRecord(goodRecord())) })
@@ -129,8 +116,17 @@ test('startup failure, no record, duplicate records and a wrong host are all inv
 test('retained output is capped exactly, flagged, and UTF-8 is not split', async () => {
   const src = `const s = 'é'.repeat(60000); process.stdout.write(s + '\\n')`
   const r = await drive({ DRV_CHILD: child('utf.cjs', src), DRV_MAXKEEP: '50001' })
-  assert.equal(r.report.truncated.stdout, true); assert.equal(r.report.status, 'no-record')
+  assert.equal(r.report.truncated.stdout, true); assert.equal(r.report.status, 'invalid')
   assert.ok(!r.report.tail.includes('�') || r.report.tail.endsWith('�'), 'only the cap boundary may hold a replacement character')
   const r2 = await drive({ DRV_CHILD: child('utf2.cjs', `process.stdout.write('é'.repeat(30000))`), DRV_MAXKEEP: '200000' })
   assert.equal(r2.report.truncated.stdout, false); assert.ok(!r2.report.tail.includes('�'))
+})
+
+test('a truncated stdout or stderr makes even a valid retained record invalid', async () => {
+  const out = printRecord(goodRecord()) + `;process.stdout.write('y'.repeat(300000) + '\\n');` + printRecord(goodRecord())
+  let r = await drive({ DRV_CHILD: child('trunc-out.cjs', out) })
+  assert.equal(r.report.status, 'invalid'); assert.equal(r.report.truncated.stdout, true); assert.ok(r.report.problems.includes('captured output truncated')); assert.equal(r.code, 1)
+  const errCase = printRecord(goodRecord()) + `;process.stderr.write('z'.repeat(300000))`
+  r = await drive({ DRV_CHILD: child('trunc-err.cjs', errCase) })
+  assert.equal(r.report.status, 'invalid'); assert.equal(r.report.truncated.stderr, true); assert.ok(r.report.problems.includes('captured output truncated'))
 })

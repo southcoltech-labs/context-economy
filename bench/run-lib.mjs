@@ -84,27 +84,28 @@ export function startBounded({ cmd, args, cwd, deadlineMs, maxKeep = 200_000, ki
       child?.stdout?.destroy(); child?.stderr?.destroy()
       resolveResult({
         reason, exitCode, exitSignal, exited, cleanup, descendantsKilled,
+        ...(spawnError ? { spawnError: String(spawnError.code ? `${spawnError.code}: ${spawnError.message}` : spawnError.message).slice(0, 300) } : {}),
         stdout: decode(out), stderr: decode(err), truncated: { stdout: out.truncated, stderr: err.truncated },
       })
     })()
     return finalizing
   }
   const timer = setTimeout(() => finalize('timeout'), deadlineMs)
-  if (spawnError || !child.pid) {
-    clearTimeout(timer)
-    resolveResult({ reason: 'spawn-error', spawnError: String(spawnError?.message ?? 'no pid').slice(0, 300), cleanup: 'clean', stdout: '', stderr: '', truncated: { stdout: false, stderr: false } })
-  } else {
-    child.stdout.on('data', take(out)); child.stderr.on('data', take(err))
-    child.on('error', (e) => { spawnError = e; finalize('spawn-error').then(() => {}) })
-    child.on('close', () => { closed = true })
-    child.on('exit', async (code, signal) => {
-      exited = true; exitCode = code; exitSignal = signal
-      // Give the pipes a moment to drain; a descendant holding them open must not hang the runner.
-      const end = Date.now() + 500
-      while (!closed && Date.now() < end) await sleep(20)
-      finalize(finalizing ? 'x' : 'exited')
-    })
-  }
+  if (child) {
+    // Always consume spawn errors, also when there is no pid: Node reports ENOENT asynchronously on the ChildProcess.
+    child.on('error', (e) => { spawnError ??= e; if (!child.pid || !exited) finalize('spawn-error') })
+    if (child.pid) {
+      child.stdout.on('data', take(out)); child.stderr.on('data', take(err))
+      child.on('close', () => { closed = true })
+      child.on('exit', async (code, signal) => {
+        exited = true; exitCode = code; exitSignal = signal
+        // Give the pipes a moment to drain; a descendant holding them open must not hang the runner.
+        const end = Date.now() + 500
+        while (!closed && Date.now() < end) await sleep(20)
+        finalize('exited')
+      })
+    }
+  } else finalize('spawn-error')
   return { interrupt: (reason) => finalize(reason), result }
 }
 
@@ -116,11 +117,38 @@ export function emitAndExit(line, code) {
   void ok
 }
 
+/**
+ * Catchable-interruption boundary for a whole CLI run. Create it first thing; the handlers then exist before any preparation. A signal that
+ * arrives during synchronous preparation is serviced as soon as preparation returns (it is queued, not lost): `signal` is set, and execute()
+ * refuses to launch a child.
+ */
+export function createLifecycle() {
+  const lc = { signal: undefined, onInterrupt: undefined }
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { lc.signal ??= sig; lc.onInterrupt?.('interrupted:' + sig) })
+  return lc
+}
+
+const finishLine = (host, deadlineMs, started, r) => emitAndExit('APPEND-RUN-JSON ' + JSON.stringify({ host, deadlineMs, elapsedMs: Date.now() - started, ...r }), r.status === 'valid' ? 0 : 1)
+
+/** Terminal refusal before any launch: cleans up, reports once, and resolves only after the report is flushed (the process then exits). */
+export async function refuse({ host, deadlineMs, started = Date.now(), cleanup = () => {}, result }) {
+  try { cleanup() } catch { /* reporting still happens */ }
+  finishLine(host, deadlineMs, started, result)
+  return new Promise(() => {}) // never continues: emitAndExit exits the process after the flush
+}
+
 /** The whole run: bounded child, interruption handling, record analysis, one report line, exit code. Used by run.mjs and by the fixtures. */
-export async function execute({ host, deadlineMs, cmd, args, cwd, extra = {}, cleanup = () => {}, started = Date.now(), maxKeep }) {
-  const report = (r) => emitAndExit('APPEND-RUN-JSON ' + JSON.stringify({ host, deadlineMs, elapsedMs: Date.now() - started, ...r }), r.status === 'valid' ? 0 : 1)
+export async function execute({ host, deadlineMs, cmd, args, cwd, extra = {}, cleanup = () => {}, started = Date.now(), maxKeep, lifecycle = createLifecycle() }) {
+  const report = (r) => finishLine(host, deadlineMs, started, r)
+  // Signal handlers only run when the event loop turns, and preparation is synchronous: yield once so a signal that arrived during it is
+  // seen before anything is launched.
+  await sleep(25)
+  if (lifecycle.signal) {
+    cleanup()
+    return report({ status: 'interrupted', interruptedBy: lifecycle.signal, launched: false, cleanup: 'clean', ...extra })
+  }
   const run = startBounded({ cmd, args, cwd, deadlineMs, maxKeep })
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { run.interrupt('interrupted:' + sig) })
+  lifecycle.onInterrupt = run.interrupt
   const r = await run.result
   cleanup()
   const lines = (r.stdout + '\n' + r.stderr).split('\n').filter((l) => l.includes(MARK))
@@ -128,14 +156,16 @@ export async function execute({ host, deadlineMs, cmd, args, cwd, extra = {}, cl
   if (lines.length === 1) {
     try { record = JSON.parse(lines[0].slice(lines[0].indexOf(MARK) + MARK.length)); problems = validateRecord(record, host) } catch { problems = ['record is not valid JSON'] }
   } else if (lines.length > 1) problems = ['duplicate marker lines: ' + lines.length]
+  // Uniqueness and completeness cannot be established over discarded bytes: any truncation makes the observation invalid.
+  if (r.truncated.stdout || r.truncated.stderr) problems.push('captured output truncated')
   const tail = (r.stderr || r.stdout).slice(-600)
   const base = { exitCode: r.exitCode, signal: r.exitSignal, cleanup: r.cleanup, truncated: r.truncated, ...extra }
-  if (r.reason === 'spawn-error') return report({ status: 'startup-failure', stage: 'spawn', reason: r.spawnError, ...extra })
+  if (r.reason === 'spawn-error') return report({ status: 'startup-failure', stage: 'spawn', reason: r.spawnError ?? 'spawn failed', cleanup: r.cleanup, ...extra })
   if (r.reason === 'timeout') return report({ status: 'timeout', ...base, problems, record, tail })
-  if (r.reason.startsWith('interrupted')) return report({ status: 'interrupted', interruptedBy: r.reason.slice(12), ...base, problems, record, tail })
-  if (!lines.length) return report({ status: 'no-record', ...base, tail })
+  if (r.reason.startsWith('interrupted')) return report({ status: 'interrupted', interruptedBy: r.reason.slice(12), launched: true, ...base, problems, record, tail })
+  if (!lines.length) return report({ status: problems.length ? 'invalid' : 'no-record', ...base, problems, tail })
   let status
-  if (record && record.valid === false && record.complete === false) status = 'incomplete'
+  if (record && record.valid === false && record.complete === false && !problems.includes('captured output truncated')) status = 'incomplete'
   else if (problems.length || r.exitCode !== 0 || r.exitSignal || r.descendantsKilled || r.cleanup === 'unconfirmed' || !record?.valid || !record?.complete) status = 'invalid'
   else status = 'valid'
   return report({ status, ...base, descendantsKilled: r.descendantsKilled, problems, record, ...(status === 'valid' ? {} : { tail }) })

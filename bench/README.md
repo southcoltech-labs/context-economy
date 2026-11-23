@@ -46,7 +46,18 @@ available inside the test realm; add them from the calling workflow.
 
 ## Failure fixtures
 
-Explicit, not part of any enforced run: `bun test bench/fixtures` (the measurement core: throws in each block in both orders, in the cold pass
-and in initialization) and `node --test bench/fixtures/run.test.mjs` (the runner with real stand-in child processes: large report through a pipe,
-interruption signals, a child that ignores SIGTERM, descendants holding the pipes, timeout with a partial record, startup failure, missing,
-duplicate and wrong-host records, output cap and UTF-8).
+Explicit, not part of any enforced run.
+
+- `bun test bench/fixtures`: the measurement core (throws in each block in both orders, in the cold pass and in initialization).
+- `node --test bench/fixtures/*.fixture.mjs`: the runner, with real stand-in child processes. `run.fixture.mjs` drives the runner library: large
+  report through a pipe, interruption signals, a child that ignores SIGTERM, descendants holding the pipes, timeout with a partial record,
+  missing executable (ENOENT, no unhandled error), no/duplicate/wrong-host records, truncated stdout or stderr, output cap and UTF-8.
+  `cli.fixture.mjs` runs the actual CLI from a temporary repo layout with stand-in `claude` and `bun` executables that record any launch:
+  invalid host or deadline (including a flag without a value), preparation failure, SIGTERM during preparation, missing executables. Each asserts
+  one complete report, no launch where none is allowed, and no scratch folder left behind.
+
+The runner fixtures are written for Node and are named `.fixture.mjs` so that `bun test` does not collect them.
+
+Any truncation of the captured output (more than 200,000 bytes on stdout or stderr) makes the run `invalid`: uniqueness of the record cannot
+be established over discarded bytes. A signal that arrives during the synchronous plugin copy is serviced when the copy returns, before any
+launch; the copy itself is not interruptible.
