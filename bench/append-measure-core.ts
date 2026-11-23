@@ -5,7 +5,8 @@
 // test realm has none, and it imports nothing, so the same file runs from the repo (Pi, bun) and from a copy of the plugin folder (Claude).
 //
 // One experimental pair = one block of 40 appends starting from a 5,000-message state, plus five warm full walks of the final 5,040-message
-// transcript. Warm and cold are by construction, not by inspecting the module's argument cache. See the measurement protocol (team docs).
+// transcript (5,000 tool calls with 1,000-field arguments, then 40 plain user messages). A cold sample walks a freshly built transcript of the
+// same shape (new argument objects, same ids and order). Warm and cold are by construction, not by inspecting the module's argument cache.
 type Walk<S> = { seen: number; raw: Record<string, number>; state: S; omitted: number; signatures: number[] }
 type Adapter<S> = { convert: (messages: readonly unknown[], state: S | undefined) => unknown; signature: (message: unknown) => number }
 export type WalkFn<S> = (previous: Walk<S> | undefined, messages: readonly unknown[], adapter: Adapter<S>) => Walk<S>
@@ -15,7 +16,7 @@ const BASE = 5000
 const APPENDS = 40
 const WARM_WALKS = 5
 const ORDERS = ['append-first', 'full-first', 'full-first', 'append-first'] as const // ABBA: counterbalanced inside one process
-const BUDGET_MS = 90_000 // stop starting pairs after this; the record says so
+const BUDGET_MS = 90_000 // soft bound: stop starting new pairs after this and say so. It is not a maximum runtime (see bench/run.mjs for the hard deadline)
 
 export type Host<S> = {
   host: 'claude' | 'pi'
@@ -45,27 +46,24 @@ export const measure = <S>(h: Host<S>): void => {
   const started = performance.now()
   const fail: string[] = []
   const warnings: string[] = []
-  const pairs: unknown[] = []
-  const cold: { pair: number; ms: number; messages: number }[] = []
-  // The shared fixture: the same message and argument objects serve the base walk, the final transcript and the warm full walks.
-  const base = Array.from({ length: BASE }, (_, i) => h.call(`t${i}`, wide()))
-  const baseSnapshot = base.length
-  const baseHead = base[0]
-  const record = (extra: Record<string, unknown>): void => {
-    const out = { schema: SCHEMA, host: h.host, ...extra }
-    console.log('APPEND-MEASURE-JSON ' + JSON.stringify(out))
-  }
+  const pairs: Record<string, unknown>[] = []
+  let stage = 'init'
+  let base: unknown[] = []
   try {
+    // The shared fixture: the same message and argument objects serve the base walk, the final transcript and the warm full walks.
+    base = Array.from({ length: BASE }, (_, i) => h.call(`t${i}`, wide()))
+    const baseHead = base[0]
     for (let pair = 0; pair < ORDERS.length; pair++) {
-      if (performance.now() - started > BUDGET_MS) { warnings.push(`truncated before pair ${pair}: budget ${BUDGET_MS} ms`); break }
+      if (performance.now() - started > BUDGET_MS) { warnings.push(`stopped before pair ${pair}: soft budget ${BUDGET_MS} ms`); break }
       const order = ORDERS[pair]!
+      stage = `pair ${pair}`
       const extras = Array.from({ length: APPENDS }, (_, i) => h.next(pair * APPENDS + i))
       const final = [...base, ...extras] // prebuilt outside every timer; same message and argument objects as base
       const appendBlock = (): { times: number[]; walk: Walk<S> } => {
         const all = base.slice() // the 5,000-message starting state, not final
         let walk = walkMessages(undefined, all, h.adapter) // untimed: the incremental state the appends continue from
         const times: number[] = []
-        h.host === 'pi' && g.Bun?.gc?.(true)
+        if (h.host === 'pi') g.Bun?.gc?.(true)
         for (let n = 0; n < APPENDS; n++) {
           all.push(extras[n])
           const t0 = performance.now()
@@ -89,37 +87,53 @@ export const measure = <S>(h: Host<S>): void => {
       if (order === 'append-first') { a = appendBlock(); f = fullBlock() } else { f = fullBlock(); a = appendBlock() }
       const equal = sameRaw(a.walk, f.walk) && a.walk.seen === BASE + APPENDS
       if (!equal) fail.push(`pair ${pair}: appended walk and full walk differ outside timing`)
-      if (base.length !== baseSnapshot || base[0] !== baseHead) fail.push(`pair ${pair}: base fixture changed`)
-      // Cold: a freshly built transcript (new argument identities, built outside the timer), after a warm-up on different disposable identities.
-      const disposable = Array.from({ length: 1000 }, (_, i) => h.call(`d${i}`, wide()))
-      walkMessages(undefined, disposable, h.adapter)
-      const fresh = Array.from({ length: BASE + APPENDS }, (_, i) => h.call(`c${pair}-${i}`, wide()))
-      const c0 = performance.now()
-      walkMessages(undefined, fresh, h.adapter)
-      cold.push({ pair, ms: performance.now() - c0, messages: fresh.length })
-      pairs.push({
-        pair, order, equal,
+      if (base.length !== BASE || base[0] !== baseHead) fail.push(`pair ${pair}: base fixture changed`)
+      // Retained now, before the optional cold work, so a later failure cannot discard these samples.
+      const entry: Record<string, unknown> = {
+        pair, order, equal, cold: 'not run',
         stateSizes: { appendStart: BASE, appendEnd: BASE + APPENDS, fullWalk: final.length },
         appendMs: a.times, warmFullMs: f.times,
         appendP95: p95(a.times), appendMedian: median(a.times), warmFullMedian: median(f.times),
         // Exploratory only. The first is tail-to-typical (a p95 over a median), the second typical-to-typical; neither is a gate or an equal-quantile comparison.
         ratioP95OverWarmMedian: p95(a.times) / median(f.times), ratioMedianOverWarmMedian: median(a.times) / median(f.times),
-      })
+      }
+      pairs.push(entry)
+      // Cold: one sample per pair (a deliberate reduction; it is a side measurement, not the denominator). The same shape as the warm final state,
+      // 5,000 tool calls plus the 40 user messages, with new argument objects built outside the timer, after a warm-up on different disposable
+      // objects. Its result is compared with the warm final state outside timing.
+      try {
+        stage = `pair ${pair} cold`
+        walkMessages(undefined, Array.from({ length: 1000 }, (_, i) => h.call(`d${i}`, wide())), h.adapter)
+        const fresh = [...Array.from({ length: BASE }, (_, i) => h.call(`t${i}`, wide())), ...extras]
+        const c0 = performance.now()
+        const cw = walkMessages(undefined, fresh, h.adapter)
+        const ms = performance.now() - c0
+        const same = sameRaw(cw, f.walk)
+        entry.cold = { ms, messages: fresh.length, shapeMatchesWarm: same }
+        if (!same) fail.push(`pair ${pair}: cold walk result differs from the warm final state`)
+      } catch (e) {
+        entry.cold = { error: String((e as Error)?.message ?? e).slice(0, 200) }
+        warnings.push(`pair ${pair}: cold sample failed`)
+      }
     }
   } catch (e) {
-    fail.push('measurement threw: ' + String((e as Error)?.message ?? e).slice(0, 200))
+    fail.push(`measurement threw at ${stage}: ` + String((e as Error)?.message ?? e).slice(0, 200))
   }
+  let resolution: number | string = 'unavailable'
+  try { resolution = resolutionMs() } catch { /* the record is still written */ }
+  const complete = pairs.length === ORDERS.length
+  const valid = fail.length === 0 && complete
   const r = {
-    kind: 'append-measurement', valid: fail.length === 0 && pairs.length === ORDERS.length, invalidReasons: fail.slice(0, 5), warnings,
-    config: { base: BASE, appends: APPENDS, warmWalks: WARM_WALKS, orders: ORDERS, budgetMs: BUDGET_MS },
+    schema: SCHEMA, host: h.host, kind: 'append-measurement', valid, complete, stage, invalidReasons: fail.slice(0, 5), warnings,
+    config: { base: BASE, appends: APPENDS, warmWalks: WARM_WALKS, orders: ORDERS, softBudgetMs: BUDGET_MS, coldSamplesPerPair: 1 },
     realm: {
       process: known('process'), navigator: known('navigator'), Bun: h.host === 'pi' ? (g.Bun?.version ?? 'unavailable') : known('Bun'),
       gc: typeof g.Bun?.gc === 'function' ? 'Bun.gc present, requested before each Pi append block' : 'Bun.gc unavailable (no collection requested)',
-      performanceNowResolutionMs: resolutionMs(),
+      performanceNowResolutionMs: resolution,
     },
-    pairs, coldMs: cold, elapsedMs: performance.now() - started,
+    pairs, elapsedMs: performance.now() - started,
     note: 'warm and cold are by construction; exploratory ratios are not gates; not the official benchmark',
   }
-  record(r)
-  if (!r.valid) throw new Error('invalid measurement: ' + (fail[0] ?? 'incomplete'))
+  console.log('APPEND-MEASURE-JSON ' + JSON.stringify(r))
+  if (!valid) throw new Error('invalid or incomplete measurement: ' + (fail[0] ?? `only ${pairs.length} of ${ORDERS.length} pairs`))
 }

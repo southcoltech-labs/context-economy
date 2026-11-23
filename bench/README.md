@@ -1,23 +1,38 @@
 # Append measurement (not a gate)
 
-Exploratory timing of one append against a full re-walk, for the context-bar walk. It does not assert on timing, is not discovered by any
+Exploratory timing of one append against a full re-walk, for the context-bar walk. It asserts nothing about timing, is not discovered by any
 test run CI enforces, and does not touch the official "controlled append benchmark" in `walk.test.ts` and `items.test.ts`.
 
 | Host | Run (explicitly, after the normal suite) | Needs |
 |---|---|---|
-| Claude plugin | `bench/run-claude.sh` | `claude` on PATH |
-| Pi extension | `bun run bench/append-pi/measure.ts` | `bun` |
+| Claude plugin | `node bench/run.mjs claude` | `node`, `claude` on PATH |
+| Pi extension | `node bench/run.mjs pi` | `node`, `bun` |
 
-`claude plugin test` refuses imports from outside a plugin folder and runs every `*.test.ts` under it, so `run-claude.sh` copies the plugin
-byte for byte without its tests into a scratch folder, adds the measurement file and runs the host there. The code measured is the production
-files, not a reimplementation.
+`run.mjs` is a bounded runner. It starts the host in its own process group with a hard deadline (default 240 s, `--deadline-ms N`), kills the
+whole group on timeout, keeps a bounded amount of output, and always prints one `APPEND-RUN-JSON {...}` line whose `status` is `valid`,
+`invalid`, `incomplete`, `timeout`, `no-record` or `startup-failure`. Exit code 0 means `valid` only. Any other status is not a sample.
+The measurement itself also has a soft bound: it stops starting new pairs after 90 s and says so. That is not a maximum runtime.
 
-Each run prints one line, `APPEND-MEASURE-JSON {...}` (schema 1): per pair the order, the 40 raw append times, five raw warm full-walk times,
-p95 and median, and two exploratory ratios (append p95 over warm-full median: tail to typical; append median over warm-full median: typical to
-typical), plus one cold full walk per pair, the realm facts that are available (`unavailable` otherwise) and `valid` with reasons. A failed
-equality check or a thrown error makes the record `valid:false` and the run fail; such a record is never a sample. Add Claude version, runner
-OS/arch and start time from the workflow step: the test realm cannot report them.
+`claude plugin test` refuses imports from outside a plugin folder and runs every `*.test.ts` under it. For the Claude host, `run.mjs` copies
+`plugins/context-bar` byte for byte without its tests into a scratch folder, checks the copy against the source by SHA-256 (the manifest hash is
+in the output), adds the measurement file and its core, checks that exactly that one test file is present, and runs the host there. The code
+measured is the production files, not a reimplementation. The scratch folder is deleted afterwards.
 
-Definitions (protocol v3, review 195): a pair is 40 appends from a 5,000-message state plus five warm full walks of the final 5,040-message
-transcript. Warm walks reuse the same objects; each cold walk uses freshly built objects after a warm-up on different disposable ones. Order is
-ABBA within a run. These are by construction; the argument cache is not queried or reset.
+## What is measured
+
+A pair is 40 appends from a 5,000-message state plus five warm full walks of the final 5,040-message transcript (5,000 tool calls with
+1,000-field arguments, then 40 plain user messages). The pair is stored as soon as it is measured. Four pairs per run, in the fixed order
+append-first, full-first, full-first, append-first; that order is the same in every run, so there is no counterbalancing across runs.
+
+- Warm walks reuse the same message and argument objects. The append side starts from its own 5,000-message walk and adds 40 messages; the full
+  side walks the prebuilt final transcript. The appended and full results are compared outside every timer.
+- One cold full walk per pair (not five): a freshly built transcript of the same shape with new argument objects, built outside the timer after
+  a warm-up on different disposable objects, compared with the warm final state outside timing. Warm and cold are by construction; the argument
+  cache is not queried or reset.
+- Per pair the record has the 40 raw append times, the five raw warm times, p95 and median, and two exploratory ratios (append p95 over
+  warm-full median, tail to typical; append median over warm-full median, typical to typical). They are not equal-quantile comparisons.
+
+The record (`APPEND-MEASURE-JSON`, schema 1) also has `valid`, `complete`, `stage`, reasons, warnings, the realm facts that are available
+(`unavailable` otherwise) and the soft budget. A failed equality or shape check, an error outside the cold pass, or fewer than four pairs makes
+it not `valid`. A failure in the cold pass alone keeps the raw samples and adds a warning. Claude version, runner OS/arch and start time are not
+available inside the test realm; add them from the calling workflow.
