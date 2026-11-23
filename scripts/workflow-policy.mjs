@@ -31,6 +31,9 @@ export const ENFORCING = [
   ["gitleaks git --config .gitleaks.toml --redact --no-banner ."],
 ];
 
+/** The one advisory ci.yml job (bench/README.md): a leaf after the official matrices that must keep running when they fail. */
+export const ADVISORY = { id: "append-measurement", condition: "${{ !cancelled() }}" };
+
 export const CODEOWNERS = "* @southcoltech-labs/maintainers";
 
 /**
@@ -100,10 +103,29 @@ export function workflowProblems(workflows, codeowners) {
   if (/^\s*(shell|defaults):/m.test(ci)) fail("ci.yml", "a shell or defaults override can swallow exit codes");
   const ciJobs = jobs(ci);
   for (const [id, job] of Object.entries(ciJobs)) {
-    if (/^ {4}if:/m.test(job)) fail(`ci.yml ${id}`, "job condition: a skipped required check counts as passing");
+    // The one advisory job may carry exactly the condition that lets it run after the official jobs whatever their result; no other job may.
+    const cond = job.match(/^ {4}if: (.+?)\s*$/m)?.[1];
+    if (/^ {4}if:/m.test(job) && !(id === ADVISORY.id && cond === ADVISORY.condition)) fail(`ci.yml ${id}`, "job condition: a skipped required check counts as passing");
+    if (id !== ADVISORY.id && /^ {4}needs:.*\bappend-measurement\b/m.test(job)) fail(`ci.yml ${id}`, "depends on the advisory job");
     for (const step of steps(job).filter((s) => /uses: actions\/checkout@/.test(s))) {
       if (!/persist-credentials: false/.test(step)) fail(`ci.yml ${id}`, "a checkout keeps its credentials");
     }
+  }
+  const adv = ciJobs[ADVISORY.id];
+  if (!adv) fail("ci.yml", `no ${ADVISORY.id} job`);
+  else {
+    if (!/^ {4}needs: \[plugins, pi\]\s*$/m.test(adv)) fail(`ci.yml ${ADVISORY.id}`, "must need exactly [plugins, pi]");
+    if (!/^ {4}if: \$\{\{ !cancelled\(\) \}\}\s*$/m.test(adv)) fail(`ci.yml ${ADVISORY.id}`, `its condition must be exactly ${ADVISORY.condition}`);
+    const mins = Number(adv.match(/^ {4}timeout-minutes: (\d+)\s*$/m)?.[1]);
+    if (!(mins >= 1 && mins <= 20)) fail(`ci.yml ${ADVISORY.id}`, "needs timeout-minutes from 1 to 20");
+    if (/\|\|\s*(true|:)/.test(adv)) fail(`ci.yml ${ADVISORY.id}`, "a command's failure is swallowed (|| true)");
+    for (const step of steps(adv)) {
+      const cond2 = step.match(/^ {8}if: (.+?)\s*$/m)?.[1];
+      if (cond2 !== undefined && cond2 !== ADVISORY.condition) fail(`ci.yml ${ADVISORY.id}`, `step condition ${cond2} is not ${ADVISORY.condition}`);
+    }
+  }
+  for (const id of ["repo", "plugins", "pi"]) {
+    if (/^ {4}needs:/m.test(ciJobs[id] ?? "")) fail(`ci.yml ${id}`, "an official job must not wait on another job");
   }
   const repo = steps(ciJobs.repo ?? "");
   for (const [cmd, cond] of ENFORCING) {

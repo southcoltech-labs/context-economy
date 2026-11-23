@@ -27,6 +27,8 @@ const SIGNOFF_STEP = "      - name: Commits signed off\n        if: github.event
 const REPO_JOB = "    name: repo checks\n    runs-on: ubuntu-latest";
 const PROMOTE_JOB = "  promote:\n    runs-on: ubuntu-latest";
 const PLAN_JOB = "    name: release state\n    runs-on: ubuntu-latest";
+const PLUGINS_JOB = "    name: plugins (${{ matrix.os }})\n    strategy:";
+const PI_JOB = "    name: pi (${{ matrix.os }})\n    strategy:";
 const TOOLING = "      - name: Release tooling tests\n        run: npm run -s test:tooling";
 
 test("the workflows and CODEOWNERS meet every rule", () => {
@@ -69,6 +71,18 @@ const CASES = [
   ["the changeset gate removed", "ci.yml", "        run: node scripts/changeset-gate.mjs", "        run: true", /no step runs node scripts\/changeset-gate\.mjs/],
   ["tooling tests limited to pushes", "ci.yml", TOOLING, TOOLING.replace("\n", "\n        if: github.event_name == 'push'\n"), /test:tooling has condition/],
   ["gitleaks narrowed", "ci.yml", "gitleaks git --config .gitleaks.toml --redact --no-banner .", "gitleaks git --config .gitleaks.toml --redact --no-banner --log-opts=-1 .", /no step runs gitleaks/],
+  ["another job gets the advisory condition", "ci.yml", PLUGINS_JOB, `${PLUGINS_JOB}\n    if: \${{ !cancelled() }}`, /plugins: job condition/],
+  ["the advisory job's condition changed", "ci.yml", "    if: ${{ !cancelled() }}\n    timeout-minutes", "    if: ${{ always() }}\n    timeout-minutes", /append-measurement: job condition/],
+  ["the advisory job's condition dropped", "ci.yml", "    if: ${{ !cancelled() }}\n    timeout-minutes", "    timeout-minutes", /its condition must be exactly/],
+  ["the advisory job stops waiting for the official jobs", "ci.yml", "    needs: [plugins, pi]", "    needs: [plugins]", /must need exactly \[plugins, pi\]/],
+  ["an official job waits on the advisory job", "ci.yml", PI_JOB, `${PI_JOB}\n    needs: append-measurement`, /pi: (depends on the advisory job|an official job must not wait)/],
+  ["the advisory job loses its timeout", "ci.yml", "    timeout-minutes: 15\n", "", /timeout-minutes from 1 to 20/],
+  ["the advisory job gets a huge timeout", "ci.yml", "    timeout-minutes: 15", "    timeout-minutes: 360", /timeout-minutes from 1 to 20/],
+  ["the advisory job tolerates failure", "ci.yml", "    timeout-minutes: 15", "    timeout-minutes: 15\n    continue-on-error: true", /continue-on-error/],
+  ["a measurement command swallows failure", "ci.yml", "node bench/run.mjs pi --deadline-ms 240000 > \"$RUNNER_TEMP/pi.out\"", "node bench/run.mjs pi --deadline-ms 240000 > \"$RUNNER_TEMP/pi.out\" || true", /swallowed/],
+  ["a measurement step gets another condition", "ci.yml", "      - name: Report\n        if: ${{ !cancelled() }}", "      - name: Report\n        if: ${{ success() }}", /step condition/],
+  ["the advisory job widens permissions", "ci.yml", "    timeout-minutes: 15", "    timeout-minutes: 15\n    permissions:\n      contents: write", /sets its own permissions/],
+  ["the advisory job removed", "ci.yml", "  append-measurement:", "  append-measurement-renamed:", /no append-measurement job/],
   ["CODEOWNERS narrowed", "CODEOWNERS", "* @southcoltech-labs/maintainers", "/plugins/ @southcoltech-labs/maintainers", /CODEOWNERS: must be exactly/],
   ["CODEOWNERS with an exception", "CODEOWNERS", "* @southcoltech-labs/maintainers", "* @southcoltech-labs/maintainers\n/scripts/ @someone", /CODEOWNERS: must be exactly/],
 ];

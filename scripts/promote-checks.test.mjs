@@ -45,7 +45,10 @@ function promoteRequiredChecks() {
   return body.join("\n");
 }
 
-const NAMES = ciCheckNames(read("ci.yml"));
+// The advisory append-measurement job (bench/README.md) is deliberately NOT a required check: promotion must neither wait for it nor fail on it.
+const ADVISORY_NAMES = ["append measurement (ubuntu-latest)", "append measurement (macos-latest)"];
+const ALL_NAMES = ciCheckNames(read("ci.yml"));
+const NAMES = ALL_NAMES.filter((n) => !ADVISORY_NAMES.includes(n));
 const REQUIRED = promoteRequiredChecks();
 
 test("promote.yml requires exactly the checks ci.yml produces", () => {
@@ -53,6 +56,11 @@ test("promote.yml requires exactly the checks ci.yml produces", () => {
   assert.ok(NAMES.includes("pi (macos-latest)"), NAMES.join(" | "));
   assert.equal(NAMES.length, 5);
   assert.deepEqual([...requiredChecks(REQUIRED)].sort(), [...NAMES].sort());
+});
+
+test("the advisory measurement checks exist in ci.yml and are not required by promotion", () => {
+  assert.deepEqual(ALL_NAMES.filter((n) => ADVISORY_NAMES.includes(n)), ADVISORY_NAMES);
+  for (const n of ADVISORY_NAMES) assert.ok(![...requiredChecks(REQUIRED)].includes(n), `${n} must not be required`);
 });
 
 test("a two-axis matrix name keeps its comma, in ci.yml's expansion and in REQUIRED_CHECKS", () => {
