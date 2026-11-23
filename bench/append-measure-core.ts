@@ -59,48 +59,56 @@ export const measure = <S>(h: Host<S>): void => {
       stage = `pair ${pair}`
       const extras = Array.from({ length: APPENDS }, (_, i) => h.next(pair * APPENDS + i))
       const final = [...base, ...extras] // prebuilt outside every timer; same message and argument objects as base
-      const appendBlock = (): { times: number[]; walk: Walk<S> } => {
+      // The pair record exists before any block runs and samples are pushed into it as they are taken, so a throw in either block, in
+      // either order, keeps every sample already collected. The flags say which parts finished.
+      const entry: Record<string, unknown> = {
+        pair, order, equal: false, appendDone: false, fullDone: false, cold: 'not run',
+        stateSizes: { appendStart: BASE, appendEnd: BASE + APPENDS, fullWalk: final.length },
+      }
+      const appendMs: number[] = []
+      const warmFullMs: number[] = []
+      entry.appendMs = appendMs
+      entry.warmFullMs = warmFullMs
+      pairs.push(entry)
+      const appendBlock = (): Walk<S> => {
         const all = base.slice() // the 5,000-message starting state, not final
         let walk = walkMessages(undefined, all, h.adapter) // untimed: the incremental state the appends continue from
-        const times: number[] = []
         if (h.host === 'pi') g.Bun?.gc?.(true)
         for (let n = 0; n < APPENDS; n++) {
           all.push(extras[n])
           const t0 = performance.now()
           walk = walkMessages(walk, all, h.adapter)
-          times.push(performance.now() - t0)
+          appendMs.push(performance.now() - t0)
         }
-        return { times, walk }
+        entry.appendDone = true
+        return walk
       }
-      const fullBlock = (): { times: number[]; walk: Walk<S> } => {
-        const times: number[] = []
+      const fullBlock = (): Walk<S> => {
         let walk = walkMessages(undefined, final, h.adapter) // untimed warm-up on the same objects
         for (let n = 0; n < WARM_WALKS; n++) {
           const t0 = performance.now()
           walk = walkMessages(undefined, final, h.adapter)
-          times.push(performance.now() - t0)
+          warmFullMs.push(performance.now() - t0)
         }
-        return { times, walk }
+        entry.fullDone = true
+        return walk
       }
-      let a: { times: number[]; walk: Walk<S> }
-      let f: { times: number[]; walk: Walk<S> }
-      if (order === 'append-first') { a = appendBlock(); f = fullBlock() } else { f = fullBlock(); a = appendBlock() }
-      const equal = sameRaw(a.walk, f.walk) && a.walk.seen === BASE + APPENDS
+      let aw: Walk<S>
+      let fw: Walk<S>
+      if (order === 'append-first') { stage = `pair ${pair} append block`; aw = appendBlock(); stage = `pair ${pair} full block`; fw = fullBlock() }
+      else { stage = `pair ${pair} full block`; fw = fullBlock(); stage = `pair ${pair} append block`; aw = appendBlock() }
+      const equal = sameRaw(aw, fw) && aw.seen === BASE + APPENDS
+      entry.equal = equal
       if (!equal) fail.push(`pair ${pair}: appended walk and full walk differ outside timing`)
       if (base.length !== BASE || base[0] !== baseHead) fail.push(`pair ${pair}: base fixture changed`)
-      // Retained now, before the optional cold work, so a later failure cannot discard these samples.
-      const entry: Record<string, unknown> = {
-        pair, order, equal, cold: 'not run',
-        stateSizes: { appendStart: BASE, appendEnd: BASE + APPENDS, fullWalk: final.length },
-        appendMs: a.times, warmFullMs: f.times,
-        appendP95: p95(a.times), appendMedian: median(a.times), warmFullMedian: median(f.times),
-        // Exploratory only. The first is tail-to-typical (a p95 over a median), the second typical-to-typical; neither is a gate or an equal-quantile comparison.
-        ratioP95OverWarmMedian: p95(a.times) / median(f.times), ratioMedianOverWarmMedian: median(a.times) / median(f.times),
-      }
-      pairs.push(entry)
+      entry.appendP95 = p95(appendMs); entry.appendMedian = median(appendMs); entry.warmFullMedian = median(warmFullMs)
+      // Exploratory only. The first is tail-to-typical (a p95 over a median), the second typical-to-typical; neither is a gate or an equal-quantile comparison.
+      entry.ratioP95OverWarmMedian = p95(appendMs) / median(warmFullMs)
+      entry.ratioMedianOverWarmMedian = median(appendMs) / median(warmFullMs)
       // Cold: one sample per pair (a deliberate reduction; it is a side measurement, not the denominator). The same shape as the warm final state,
       // 5,000 tool calls plus the 40 user messages, with new argument objects built outside the timer, after a warm-up on different disposable
-      // objects. Its result is compared with the warm final state outside timing.
+      // objects. Its result is compared with the warm final state outside timing. A planned cold sample that throws invalidates the observation;
+      // the append and warm samples stay in the record for inspection.
       try {
         stage = `pair ${pair} cold`
         walkMessages(undefined, Array.from({ length: 1000 }, (_, i) => h.call(`d${i}`, wide())), h.adapter)
@@ -108,12 +116,12 @@ export const measure = <S>(h: Host<S>): void => {
         const c0 = performance.now()
         const cw = walkMessages(undefined, fresh, h.adapter)
         const ms = performance.now() - c0
-        const same = sameRaw(cw, f.walk)
+        const same = sameRaw(cw, fw)
         entry.cold = { ms, messages: fresh.length, shapeMatchesWarm: same }
         if (!same) fail.push(`pair ${pair}: cold walk result differs from the warm final state`)
       } catch (e) {
         entry.cold = { error: String((e as Error)?.message ?? e).slice(0, 200) }
-        warnings.push(`pair ${pair}: cold sample failed`)
+        fail.push(`pair ${pair}: cold sample failed: ` + String((e as Error)?.message ?? e).slice(0, 120))
       }
     }
   } catch (e) {
@@ -121,7 +129,7 @@ export const measure = <S>(h: Host<S>): void => {
   }
   let resolution: number | string = 'unavailable'
   try { resolution = resolutionMs() } catch { /* the record is still written */ }
-  const complete = pairs.length === ORDERS.length
+  const complete = pairs.length === ORDERS.length && pairs.every(p => p.appendDone === true && p.fullDone === true && typeof (p.cold as { ms?: unknown })?.ms === 'number')
   const valid = fail.length === 0 && complete
   const r = {
     schema: SCHEMA, host: h.host, kind: 'append-measurement', valid, complete, stage, invalidReasons: fail.slice(0, 5), warnings,

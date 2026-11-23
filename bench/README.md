@@ -8,9 +8,15 @@ test run CI enforces, and does not touch the official "controlled append benchma
 | Claude plugin | `node bench/run.mjs claude` | `node`, `claude` on PATH |
 | Pi extension | `node bench/run.mjs pi` | `node`, `bun` |
 
-`run.mjs` is a bounded runner. It starts the host in its own process group with a hard deadline (default 240 s, `--deadline-ms N`), kills the
-whole group on timeout, keeps a bounded amount of output, and always prints one `APPEND-RUN-JSON {...}` line whose `status` is `valid`,
-`invalid`, `incomplete`, `timeout`, `no-record` or `startup-failure`. Exit code 0 means `valid` only. Any other status is not a sample.
+`run.mjs` is a bounded runner. It starts the host in its own process group with a hard deadline (default 240 s; `--deadline-ms N`, a plain
+integer from 1000 to 3600000), terminates the whole group on timeout or on SIGINT/SIGTERM/SIGHUP (SIGTERM, then SIGKILL after 3 s, then waits up
+to 5 s to confirm the group is gone and reports `cleanup: unconfirmed` if it cannot), removes the scratch copy, keeps at most 200,000 bytes of
+each output stream (exact cap, `truncated` flag, UTF-8 decoded as a whole), and prints one complete `APPEND-RUN-JSON {...}` line, written and
+flushed before exit. `status` is `valid`, `invalid`, `incomplete`, `timeout`, `interrupted`, `no-record` or `startup-failure`. Exit code 0
+means `valid` only; any other status is not a sample. A host that exits while descendants remain is `invalid` and the descendants are killed.
+`valid` also requires the record to pass validation: schema, kind, requested host, flags, four pairs in the fixed order, state sizes, 40 append
+and five warm samples per pair, finite non-negative times, a complete cold sample, derived p95/median/ratios recomputed, and exactly one record.
+SIGKILL of the runner itself cannot be handled: it can leave the host running and prints nothing.
 The measurement itself also has a soft bound: it stops starting new pairs after 90 s and says so. That is not a maximum runtime.
 
 `claude plugin test` refuses imports from outside a plugin folder and runs every `*.test.ts` under it. For the Claude host, `run.mjs` copies
@@ -33,6 +39,14 @@ append-first, full-first, full-first, append-first; that order is the same in ev
   warm-full median, tail to typical; append median over warm-full median, typical to typical). They are not equal-quantile comparisons.
 
 The record (`APPEND-MEASURE-JSON`, schema 1) also has `valid`, `complete`, `stage`, reasons, warnings, the realm facts that are available
-(`unavailable` otherwise) and the soft budget. A failed equality or shape check, an error outside the cold pass, or fewer than four pairs makes
-it not `valid`. A failure in the cold pass alone keeps the raw samples and adds a warning. Claude version, runner OS/arch and start time are not
+(`unavailable` otherwise) and the soft budget. A failed equality or shape check, any thrown error (including in a cold sample), or fewer than four finished pairs makes
+it not `valid`. Samples are pushed into the pair record as they are taken, so a failure keeps everything collected before it, with
+`appendDone`/`fullDone` flags saying which blocks finished. Claude version, runner OS/arch and start time are not
 available inside the test realm; add them from the calling workflow.
+
+## Failure fixtures
+
+Explicit, not part of any enforced run: `bun test bench/fixtures` (the measurement core: throws in each block in both orders, in the cold pass
+and in initialization) and `node --test bench/fixtures/run.test.mjs` (the runner with real stand-in child processes: large report through a pipe,
+interruption signals, a child that ignores SIGTERM, descendants holding the pipes, timeout with a partial record, startup failure, missing,
+duplicate and wrong-host records, output cap and UTF-8).
