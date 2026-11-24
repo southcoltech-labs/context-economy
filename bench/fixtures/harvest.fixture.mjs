@@ -118,7 +118,7 @@ const runCli = (args, stub, now = '2026-11-25T00:00:00.000Z') => new Promise((re
 const job = (id, name, over = {}) => ({ id, name, status: 'completed', conclusion: 'success', started_at: 's', completed_at: 'c', ...over })
 const R = 'o/r'
 const base = () => ({
-  [`repos/${R}/actions/workflows/ci.yml/runs`]: { workflow_runs: [{ id: 100, run_attempt: 2, event: 'pull_request', head_sha: 'c'.repeat(40), created_at: '2026-11-24T00:00:00Z' }] },
+  [`repos/${R}/actions/workflows/ci.yml/runs`]: { total_count: 1, workflow_runs: [{ id: 100, run_attempt: 2, event: 'pull_request', head_sha: 'c'.repeat(40), created_at: '2026-11-24T00:00:00Z' }] },
   [`repos/${R}/actions/runs/100/attempts/1/jobs`]: { jobs: [job(1, 'append measurement (ubuntu-latest)'), job(2, 'plugins (macos-latest)', { conclusion: 'failure' }), job(3, 'repo checks'), job(4, 'pi (ubuntu-latest)', { status: 'in_progress', conclusion: null })] },
   [`repos/${R}/actions/runs/100/attempts/2/jobs`]: { jobs: [job(5, 'append measurement (ubuntu-latest)'), job(6, 'append measurement (macos-latest)', { conclusion: 'cancelled' })] },
   [`repos/${R}/actions/jobs/1/logs`]: report(),
@@ -325,8 +325,8 @@ test('more than 100 runs are read when the limit asks for them', async () => {
   const resp = base()
   const runs = `repos/${R}/actions/workflows/ci.yml/runs`
   const mk = (id) => ({ id, run_attempt: 1, event: 'push', head_sha: 'd'.repeat(40), created_at: '2026-11-24T00:00:00Z' })
-  resp[runs] = { workflow_runs: Array.from({ length: 100 }, (_, i) => mk(200 + i)) }
-  resp[runs + '?per_page=100&page=2'] = { workflow_runs: [mk(100)] }
+  resp[runs] = { total_count: 101, workflow_runs: Array.from({ length: 100 }, (_, i) => mk(200 + i)) }
+  resp[runs + '?per_page=100&page=2'] = { total_count: 101, workflow_runs: [mk(100)] }
   resp[`repos/${R}/actions/runs/`] = { jobs: [] } // every filler run has no jobs
   const { dir, stub } = makeEnv(resp)
   const out = join(dir, 'ds')
@@ -361,4 +361,25 @@ test('two harvests started together never store a key twice', async () => {
   assert.equal(keys.length, 4); assert.equal(new Set(keys).size, 4)
   const raw = readdirSync(out).filter((n) => n.endsWith('.jsonl')).map((n) => readFileSync(join(out, n), 'utf8').split('\n').filter(Boolean).length)
   assert.equal(raw.reduce((x, y) => x + y, 0), 4) // also on disk, not only after the reader's de-duplication
+})
+
+test('a run list that moves while it is paged fails closed and writes nothing', async () => {
+  const runs = `repos/${R}/actions/workflows/ci.yml/runs`
+  const mk = (id) => ({ id, run_attempt: 1, event: 'push', head_sha: 'd'.repeat(40), created_at: '2026-11-24T00:00:00Z' })
+  const page1 = (total) => ({ total_count: total, workflow_runs: Array.from({ length: 100 }, (_, i) => mk(200 + i)) })
+  const attempt = async (resp, expected) => {
+    const { dir, stub } = makeEnv({ ...base(), ...resp, [`repos/${R}/actions/runs/`]: { jobs: [] } })
+    const out = join(dir, 'ds')
+    const r = await runCli(['--repo', R, '--out-dir', out, '--limit', '150'], stub)
+    assert.equal(r.code, 1, r.out); assert.match(r.err, expected)
+    assert.deepEqual(readdirSync(out), []) // no data file, and the lock was released
+  }
+  // a new run arrives between the requests: page 2 repeats page 1's last run (199 -> 200 shifted by one) and the oldest run is displaced
+  await attempt({ [runs]: page1(102), [runs + '?per_page=100&page=2']: { total_count: 102, workflow_runs: [mk(299), mk(100)] } }, /run 299 appeared on two pages/)
+  // the total itself changes
+  await attempt({ [runs]: page1(101), [runs + '?per_page=100&page=2']: { total_count: 102, workflow_runs: [mk(100), mk(101)] } }, /total_count went from 101 to 102/)
+  // every page read, but fewer runs than the API reports
+  await attempt({ [runs]: page1(103), [runs + '?per_page=100&page=2']: { total_count: 103, workflow_runs: [mk(100)] } }, /collected 101 runs but the API reports 103/)
+  // no numeric total at all
+  await attempt({ [runs]: { workflow_runs: [mk(1)] } }, /no workflow_runs array or numeric total_count/)
 })

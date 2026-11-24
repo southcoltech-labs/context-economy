@@ -80,14 +80,26 @@ export function parseOfficial(log) {
 const gh = async (args) => (await run(GH, ['api', '--allow-escape-sequences', ...args], { maxBuffer: MAX_LOG + 1_000_000 })).stdout
 const ghJson = async (path) => JSON.parse(await gh([path]))
 
+/** Completed runs, newest first, at most `limit`. Fails closed when the list moves under the pagination: a missing or changing `total_count`, a run id
+ *  seen on two pages (a new run pushed the rest down), or, when every page was read, a collected count that is not the reported total. */
 async function listRuns({ repo, workflow, since, limit }) {
   const runs = []
+  const ids = new Set()
+  let total, exhausted = false
   for (let page = 1; runs.length < limit; page++) {
     const q = `per_page=100&page=${page}&status=completed${since ? `&created=%3E%3D${encodeURIComponent(since)}` : ''}`
     const r = await ghJson(`repos/${repo}/actions/workflows/${workflow}/runs?${q}`)
+    if (!Array.isArray(r.workflow_runs) || !Number.isInteger(r.total_count)) throw new Error(`run list page ${page}: unexpected response (no workflow_runs array or numeric total_count)`)
+    if (total !== undefined && r.total_count !== total) throw new Error(`run list changed while paging: total_count went from ${total} to ${r.total_count}; refusing a partial harvest`)
+    total = r.total_count
+    for (const run of r.workflow_runs) {
+      if (ids.has(run.id)) throw new Error(`run list changed while paging: run ${run.id} appeared on two pages; refusing a partial harvest`)
+      ids.add(run.id)
+    }
     runs.push(...r.workflow_runs)
-    if (r.workflow_runs.length < 100) break
+    if (r.workflow_runs.length < 100) { exhausted = true; break }
   }
+  if (exhausted && runs.length !== total) throw new Error(`run list: collected ${runs.length} runs but the API reports ${total}; refusing a partial harvest`)
   return runs.slice(0, limit)
 }
 
