@@ -8,7 +8,7 @@
 // The report is written in full and flushed before exit, and always ends with a sentinel line `END-OF-APPEND-REPORT verdict=<admissible|not-admissible>`.
 import { appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { validateRecord } from './run-lib.mjs'
+import { validateWrapper } from './run-lib.mjs'
 
 const MAX_RAW = 200_000 // a raw status line or metadata longer than this cannot be retained whole in the summary: not admissible
 const dir = process.argv[2]
@@ -31,20 +31,7 @@ function host(name) {
   const problems = []
   if (!isObj(w)) return { name, status: 'missing', problems: ['status line is not an object'], raw: raw.slice(0, 2000), rawComplete: raw.length <= 2000, admissible: false }
   if (raw.length > MAX_RAW) problems.push(`raw status line is ${raw.length} characters, over the ${MAX_RAW} retention bound`)
-  if (w.host !== name) problems.push(`wrapper host is ${JSON.stringify(w.host)}, expected ${name}`)
-  if (w.status !== 'valid') problems.push(`wrapper status is ${JSON.stringify(w.status)}`)
-  if (w.exitCode !== 0) problems.push(`exitCode ${JSON.stringify(w.exitCode)}`)
-  if (w.signal !== null) problems.push(`signal ${JSON.stringify(w.signal)}`)
-  if (w.cleanup !== 'clean') problems.push(`cleanup ${JSON.stringify(w.cleanup)}`)
-  if (!isObj(w.truncated) || w.truncated.stdout !== false || w.truncated.stderr !== false) problems.push('output truncation not ruled out')
-  if (w.descendantsKilled) problems.push('descendants outlived the host')
-  if (!Array.isArray(w.problems) || w.problems.length) problems.push('wrapper reported problems')
-  if (!isObj(w.record)) problems.push('no record')
-  else {
-    for (const p of validateRecord(w.record, name)) problems.push(`record: ${p}`)
-    if (w.record.valid !== true) problems.push('record.valid is not true')
-    if (w.record.complete !== true) problems.push('record.complete is not true')
-  }
+  problems.push(...validateWrapper(w, name))
   return { name, status: typeof w.status === 'string' ? w.status : 'unknown', problems, raw: raw.length > MAX_RAW ? raw.slice(0, 2000) : raw, rawLength: raw.length, rawComplete: raw.length <= MAX_RAW, record: isObj(w.record) ? w.record : undefined, elapsedMs: w.elapsedMs, cleanup: w.cleanup, admissible: problems.length === 0 }
 }
 

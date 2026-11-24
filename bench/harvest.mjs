@@ -19,12 +19,12 @@
 // archived month is added as one more gzip member, which gunzip reads as part of the same file. `--tsv` derives one row per pair (and one per
 // official benchmark job) from the whole directory; the JSONL files stay the source of truth.
 import { execFile } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { validateRecord } from './run-lib.mjs'
+import { validateWrapper } from './run-lib.mjs'
 
 const run = promisify(execFile)
 const GH = process.env.BENCH_GH || 'gh' // overridable so fixtures can use a stand-in
@@ -32,7 +32,7 @@ const MAX_LOG = 20_000_000 // a log larger than this is not parsed; the job is r
 
 // ---- parsing (pure) ----
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g
-const STAMP = /^﻿?\d{4}-\d{2}-\d{2}T[\d:.]+Z /
+const STAMP = /^﻿?\d{4}-\d{2}-\d{2}T[\d:.]+Z(?: |$)/
 export const cleanLines = (log) => log.replace(ANSI, '').split(/\r?\n/).map((l) => l.replace(STAMP, ''))
 
 /** The lines of the ```json block that follows the first line starting with `summaryStart`, joined. undefined when absent or unterminated. */
@@ -55,17 +55,7 @@ function hostFrom(lines, name) {
   if (note[2] !== 'complete') return { raw, rawComplete: false, valid: false, problems: ['the report shows only a shortened diagnostic'] }
   let w
   try { w = JSON.parse(raw) } catch { return { raw, rawComplete: true, valid: false, problems: ['status line is not JSON'] } }
-  const problems = []
-  if (!w || typeof w !== 'object' || Array.isArray(w)) problems.push('status line is not an object')
-  else {
-    if (w.host !== name) problems.push(`wrapper host ${JSON.stringify(w.host)}`)
-    if (w.status !== 'valid') problems.push(`wrapper status ${JSON.stringify(w.status)}`)
-    if (!w.record || typeof w.record !== 'object') problems.push('no record')
-    else {
-      for (const p of validateRecord(w.record, name)) problems.push('record: ' + p)
-      if (w.record.valid !== true || w.record.complete !== true) problems.push('record not valid and complete')
-    }
-  }
+  const problems = validateWrapper(w, name) // the same contract bench/summarize.mjs applies
   return { raw, rawComplete: true, valid: problems.length === 0, problems }
 }
 
@@ -101,6 +91,23 @@ async function listRuns({ repo, workflow, since, limit }) {
   return runs.slice(0, limit)
 }
 
+/** Every job of one attempt. Follows the pages and fails closed unless it ends with exactly `total_count` distinct jobs. */
+async function listJobs(repo, runId, attempt) {
+  const jobs = []
+  let total
+  for (let page = 1; ; page++) {
+    const r = await ghJson(`repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`)
+    if (!Array.isArray(r.jobs)) throw new Error(`jobs of run ${runId} attempt ${attempt}: unexpected response`)
+    if (total !== undefined && r.total_count !== total) throw new Error(`jobs of run ${runId} attempt ${attempt}: the reported total changed from ${total} to ${r.total_count} while paging; refusing a partial harvest`)
+    total = r.total_count
+    jobs.push(...r.jobs)
+    if (r.jobs.length < 100) break
+  }
+  const distinct = new Set(jobs.map((j) => j.id)).size
+  if (typeof total === 'number' && (jobs.length !== total || distinct !== total)) throw new Error(`jobs of run ${runId} attempt ${attempt}: collected ${jobs.length} (${distinct} distinct) but the API reports ${total}; refusing a partial harvest`)
+  return jobs
+}
+
 const osOf = (name) => /\((.+)\)$/.exec(name)?.[1] ?? null
 const sourceOf = (name) => (name.startsWith('append measurement (') ? 'advisory' : /^(plugins|pi) \(/.test(name) ? 'official' : null)
 
@@ -109,7 +116,7 @@ export async function harvest({ repo, workflow = 'ci.yml', since, limit = 50, lo
   const runs = await listRuns({ repo, workflow, since, limit })
   for (const r of runs) {
     for (let attempt = 1; attempt <= r.run_attempt; attempt++) {
-      const jobs = (await ghJson(`repos/${repo}/actions/runs/${r.id}/attempts/${attempt}/jobs?per_page=100`)).jobs
+      const jobs = await listJobs(repo, r.id, attempt)
       for (const j of jobs) {
         const source = sourceOf(j.name)
         if (!source || j.status !== 'completed') continue
@@ -145,7 +152,7 @@ export function merge(existingText, rows, harvestedAt) {
   let skipped = 0
   for (const row of rows) {
     const prev = have.get(row.key)
-    if (!prev) { add.push({ ...row, harvestedAt }); continue }
+    if (!prev) { const o = { ...row, harvestedAt }; add.push(o); have.set(row.key, o); continue } // later rows in this batch are checked against it
     const { harvestedAt: _drop, ...rest } = prev
     if (same(rest, row)) skipped++; else conflicts.push(row.key)
   }
@@ -160,31 +167,64 @@ export const monthOf = (row) => {
   return m[1]
 }
 
-/** The whole dataset as one text, in file-name order. Each file must be empty or end with a newline. */
+const parseRows = (text, name) => text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { throw new Error(`${name} holds a line that is not JSON`) } })
+const withoutStamp = ({ harvestedAt: _h, ...rest }) => rest
+
+/** Reads one dataset file (plain or gzip, which may hold several members). It must be empty or end with a newline. */
+function readFile(dir, name) {
+  const buf = readFileSync(join(dir, name))
+  const t = (name.endsWith('.gz') ? gunzipSync(buf) : buf).toString('utf8')
+  if (t && !t.endsWith('\n')) throw new Error(`${name} does not end with a newline`)
+  return t
+}
+
+/** The whole dataset as one text, in file-name order, one line per key. A key stored twice with the same content (for example a plain file left
+ *  beside the archive that already holds it) is read once; two different records for one key are an error. */
 export function readDataset(dir) {
   if (!existsSync(dir)) return ''
+  const seen = new Map()
   let text = ''
   for (const name of readdirSync(dir).filter((n) => FILE.test(n)).sort()) {
-    const buf = readFileSync(join(dir, name))
-    const t = (name.endsWith('.gz') ? gunzipSync(buf) : buf).toString('utf8')
-    if (t && !t.endsWith('\n')) throw new Error(`${name} does not end with a newline`)
-    text += t
+    for (const o of parseRows(readFile(dir, name), name)) {
+      const prev = seen.get(o.key)
+      if (prev) { if (!same(withoutStamp(prev), withoutStamp(o))) throw new Error(`the dataset holds two different records for ${o.key}`); continue }
+      seen.set(o.key, o)
+      text += JSON.stringify(o) + '\n'
+    }
   }
   return text
 }
 
-/** Adds rows to the file of their month: appended to the plain file, or as one more gzip member when that month is already archived. */
+/** Replaces `path` with `content` through a temporary file in the same folder, so a stop leaves either the old file or the new one. */
+export function replaceFile(path, content, verify) {
+  const tmp = path + '.tmp'
+  rmSync(tmp, { force: true })
+  writeFileSync(tmp, content)
+  if (verify && !verify(readFileSync(tmp))) { rmSync(tmp, { force: true }); throw new Error(`the new ${path} did not read back as expected; it was not installed`) }
+  renameSync(tmp, path)
+}
+
+/** Adds rows to the file of their month: the plain file, or, when that month is archived, a new gzip member. Either way the old file is
+ *  replaced atomically, and the archive is read back before it is installed. */
 export function writeRows(dir, rows) {
   mkdirSync(dir, { recursive: true })
   const by = new Map()
   for (const r of rows) { const m = monthOf(r); by.set(m, (by.get(m) ?? '') + JSON.stringify(r) + '\n') }
   for (const [m, text] of by) {
-    const gz = join(dir, `append-${m}.jsonl.gz`)
-    if (existsSync(gz)) appendFileSync(gz, gzipSync(text)); else appendFileSync(join(dir, `append-${m}.jsonl`), text)
+    const gz = join(dir, `append-${m}.jsonl.gz`), plain = join(dir, `append-${m}.jsonl`)
+    if (existsSync(gz)) {
+      const old = readFileSync(gz), oldText = gunzipSync(old)
+      replaceFile(gz, Buffer.concat([old, gzipSync(text)]), (b) => gunzipSync(b).equals(Buffer.concat([oldText, Buffer.from(text)])))
+    } else {
+      const old = existsSync(plain) ? readFileSync(plain) : Buffer.alloc(0)
+      replaceFile(plain, Buffer.concat([old, Buffer.from(text)]))
+    }
   }
 }
 
-/** Gzips every plain monthly file older than the month of `nowIso`. The archive is read back before the plain file is removed. */
+/** Gzips every plain monthly file older than the month of `nowIso`. A plain file beside an archive is first reduced to the rows the archive does
+ *  not already hold (this is the state left by a stop between installing the archive and removing the plain file). The archive is read back before
+ *  it is installed, and the plain file is removed only after that. */
 export function compact(dir, nowIso) {
   if (!existsSync(dir)) return 0
   const current = nowIso.slice(0, 7)
@@ -192,17 +232,34 @@ export function compact(dir, nowIso) {
   for (const name of readdirSync(dir).sort()) {
     const m = /^append-(\d{4}-\d{2})\.jsonl$/.exec(name)
     if (!m || m[1] >= current) continue
-    const plain = join(dir, name), gz = join(dir, name + '.gz'), tmp = gz + '.tmp'
-    const text = readFileSync(plain)
+    const plain = join(dir, name), gz = plain + '.gz'
     const prior = existsSync(gz) ? readFileSync(gz) : Buffer.alloc(0)
-    writeFileSync(tmp, Buffer.concat([prior, gzipSync(text)]))
-    const want = Buffer.concat([prior.length ? gunzipSync(prior) : Buffer.alloc(0), text])
-    if (!gunzipSync(readFileSync(tmp)).equals(want)) { unlinkSync(tmp); throw new Error(`archive check failed for ${name}; the plain file is kept`) }
-    renameSync(tmp, gz)
+    const priorText = prior.length ? gunzipSync(prior) : Buffer.alloc(0)
+    const held = new Map(parseRows(priorText.toString('utf8'), name + '.gz').map((o) => [o.key, o]))
+    let fresh = ''
+    for (const o of parseRows(readFile(dir, name), name)) {
+      const prev = held.get(o.key)
+      if (!prev) { held.set(o.key, o); fresh += JSON.stringify(o) + '\n'; continue }
+      if (!same(withoutStamp(prev), withoutStamp(o))) throw new Error(`${name} and its archive hold different records for ${o.key}`)
+    }
+    if (fresh) replaceFile(gz, Buffer.concat([prior, gzipSync(fresh)]), (b) => gunzipSync(b).equals(Buffer.concat([priorText, Buffer.from(fresh)])))
     unlinkSync(plain)
     n++
   }
   return n
+}
+
+const LOCK = '.harvest.lock'
+/** One writer at a time: the lock is a directory made atomically. It is never broken automatically; a stale one (the process was killed) is
+ *  removed by hand once no other harvest is running. Returns a release function. */
+export function lockDataset(dir) {
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, LOCK)
+  try { mkdirSync(path) } catch (e) {
+    if (e.code === 'EEXIST') throw new Error(`${path} exists: another harvest is running, or one was killed. Remove it by hand only when no harvest is running`)
+    throw e
+  }
+  return () => rmSync(path, { recursive: true, force: true })
 }
 
 const TSV_COLS = ['source', 'runId', 'attempt', 'jobId', 'job', 'os', 'event', 'headSha', 'conclusion', 'verdict', 'host', 'hostValid', 'pair', 'order', 'appendP95', 'appendMedian', 'warmFullMedian', 'ratioP95OverWarmMedian', 'ratioMedianOverWarmMedian', 'coldMs', 'round1', 'round2', 'round3', 'collection', 'note']
@@ -252,17 +309,21 @@ async function main() {
   if (a.error) { console.error(a.error); return 2 }
   const dir = a['out-dir']
   const now = process.env.BENCH_NOW || new Date().toISOString() // the variable exists for the fixtures
-  let existing
-  try { existing = readDataset(dir) } catch (e) { console.error(`cannot read the dataset: ${e.message}`); return 1 }
-  let rows
-  try { rows = await harvest({ ...a, log: (l) => console.error(l) }) } catch (e) { console.error('harvest failed: ' + String(e.stderr || e.message).slice(0, 500)); return 1 }
-  let m
-  try { m = merge(existing, rows, now) } catch (e) { console.error(`cannot merge: ${e.message}`); return 1 }
-  if (m.conflicts.length) { console.error(`conflict: already recorded with different content, nothing written: ${m.conflicts.join(', ')}`); return 1 }
-  let archived = 0
-  try { writeRows(dir, m.newRows); archived = compact(dir, now); if (a.tsv) writeFileSync(a.tsv, toTsv(readDataset(dir))) } catch (e) { console.error(`cannot write: ${e.message}`); return 1 }
-  console.log(`harvested ${rows.length} job records: ${m.added} added, ${m.skipped} already present, ${archived} month file(s) archived`)
-  return 0
+  let release
+  try { release = lockDataset(dir) } catch (e) { console.error(e.message); return 1 }
+  try {
+    let existing
+    try { existing = readDataset(dir) } catch (e) { console.error(`cannot read the dataset: ${e.message}`); return 1 }
+    let rows
+    try { rows = await harvest({ ...a, log: (l) => console.error(l) }) } catch (e) { console.error('harvest failed: ' + String(e.stderr || e.message).slice(0, 500)); return 1 }
+    let m
+    try { m = merge(existing, rows, now) } catch (e) { console.error(`cannot merge: ${e.message}`); return 1 }
+    if (m.conflicts.length) { console.error(`conflict: already recorded with different content, nothing written: ${m.conflicts.join(', ')}`); return 1 }
+    let archived = 0
+    try { writeRows(dir, m.newRows); archived = compact(dir, now); if (a.tsv) writeFileSync(a.tsv, toTsv(readDataset(dir))) } catch (e) { console.error(`cannot write: ${e.message}`); return 1 }
+    console.log(`harvested ${rows.length} job records: ${m.added} added, ${m.skipped} already present, ${archived} month file(s) archived`)
+    return 0
+  } finally { release() }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().then((c) => { process.exitCode = c })

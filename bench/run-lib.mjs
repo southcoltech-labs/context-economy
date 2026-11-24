@@ -16,6 +16,29 @@ const close = (a, b) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.
 /** Strict deadline parsing: a plain decimal integer in [1000, 3600000]. Returns undefined when invalid. */
 export const parseDeadline = (raw) => (raw === undefined ? 240_000 : /^\d{1,7}$/.test(raw) && Number(raw) >= 1000 && Number(raw) <= 3_600_000 ? Number(raw) : undefined)
 
+/** The wrapper contract for one host's status line `w` (the object `bench/run.mjs` prints). Returns a list of problems; empty means admissible.
+ *  Shared by bench/summarize.mjs (the CI report) and bench/harvest.mjs so the two cannot disagree about what a valid host is. */
+export function validateWrapper(w, host) {
+  const problems = []
+  const isObj = (x) => x && typeof x === 'object' && !Array.isArray(x)
+  if (!isObj(w)) return ['status line is not an object']
+  if (w.host !== host) problems.push(`wrapper host is ${JSON.stringify(w.host)}, expected ${host}`)
+  if (w.status !== 'valid') problems.push(`wrapper status is ${JSON.stringify(w.status)}`)
+  if (w.exitCode !== 0) problems.push(`exitCode ${JSON.stringify(w.exitCode)}`)
+  if (w.signal !== null) problems.push(`signal ${JSON.stringify(w.signal)}`)
+  if (w.cleanup !== 'clean') problems.push(`cleanup ${JSON.stringify(w.cleanup)}`)
+  if (!isObj(w.truncated) || w.truncated.stdout !== false || w.truncated.stderr !== false) problems.push('output truncation not ruled out')
+  if (w.descendantsKilled) problems.push('descendants outlived the host')
+  if (!Array.isArray(w.problems) || w.problems.length) problems.push('wrapper reported problems')
+  if (!isObj(w.record)) problems.push('no record')
+  else {
+    for (const p of validateRecord(w.record, host)) problems.push(`record: ${p}`)
+    if (w.record.valid !== true) problems.push('record.valid is not true')
+    if (w.record.complete !== true) problems.push('record.complete is not true')
+  }
+  return problems
+}
+
 /** Returns a list of problems; empty means the record is a well-formed, complete, valid observation for `host`. */
 export function validateRecord(r, host) {
   const bad = []

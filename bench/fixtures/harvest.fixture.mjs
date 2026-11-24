@@ -3,13 +3,13 @@
 // Fixtures for the read-only harvest (bench/harvest.mjs). Run: `node --test bench/fixtures/*.fixture.mjs`.
 // The CLI tests use a stand-in `gh` (BENCH_GH) that serves canned responses and records every call, so nothing touches GitHub.
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { compact, merge, monthOf, parseAdvisory, parseOfficial, readDataset, toTsv, writeRows } from '../harvest.mjs'
+import { compact, lockDataset, merge, monthOf, replaceFile, parseAdvisory, parseOfficial, readDataset, toTsv, writeRows } from '../harvest.mjs'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import { goodRecord } from './helpers.mjs'
 
@@ -47,7 +47,7 @@ test('a log without the end sentinel, with a shortened diagnostic, or with bad h
   const swapped = parseAdvisory(report({ claude: wrapper('pi') }))
   assert.equal(swapped.claude.valid, false); assert.equal(swapped.pi.valid, true)
   const notValid = parseAdvisory(report({ pi: wrapper('pi', { record: { ...goodRecord('pi'), valid: false } }) }))
-  assert.equal(notValid.pi.valid, false); assert.match(notValid.pi.problems.join(), /not valid and complete|record:/)
+  assert.equal(notValid.pi.valid, false); assert.match(notValid.pi.problems.join(), /record\.valid is not true/)
   const fewPairs = parseAdvisory(report({ pi: wrapper('pi', { record: { ...goodRecord('pi'), pairs: goodRecord('pi').pairs.slice(0, 2) } }) }))
   assert.equal(fewPairs.pi.valid, false); assert.match(fewPairs.pi.problems.join(), /record: pair count/)
   const inconsistent = parseAdvisory(report({ claude: wrapper('claude', { record: (() => { const r = goodRecord('claude'); r.pairs[0].appendP95 = 99; return r })() }) }))
@@ -101,7 +101,7 @@ const d = ${JSON.stringify(dir)}
 fs.appendFileSync(d + '/calls.log', JSON.stringify(process.argv.slice(2)) + '\\n')
 const path = process.argv.slice(2).filter((a) => !a.startsWith('--') && a !== 'api')[0]
 const r = JSON.parse(fs.readFileSync(d + '/responses.json', 'utf8'))
-const hit = Object.keys(r).find((k) => path.startsWith(k))
+const hit = Object.keys(r).filter((k) => path.startsWith(k)).sort((a, b) => b.length - a.length)[0]
 if (!hit) { console.error('HTTP 404 ' + path); process.exit(1) }
 if (r[hit] === null) { console.error('HTTP 410 gone'); process.exit(1) }
 process.stdout.write(typeof r[hit] === 'string' ? r[hit] : JSON.stringify(r[hit]))
@@ -168,8 +168,7 @@ test('bad arguments and a failing listing exit nonzero without writing', async (
   }
   const failed = await runCli(['--repo', R, '--out-dir', out], stub) // the stub answers 404 for the run listing
   assert.equal(failed.code, 1); assert.match(failed.err, /harvest failed/)
-  assert.equal(existsSync(out), false)
-  mkdirSync(out)
+  assert.deepEqual(readdirSync(out), []) // no data files, and the lock was released
   writeFileSync(join(out, 'append-2026-10.jsonl'), '{"key":"k"}') // no trailing newline: refuse to use it
   assert.equal((await runCli(['--repo', R, '--out-dir', out], stub)).code, 1)
 })
@@ -229,4 +228,137 @@ test('two different records for one key already in the dataset stop the harvest'
   writeFileSync(join(out, 'append-2026-11.jsonl'), k('success') + k('failure'))
   const r = await runCli(['--repo', R, '--out-dir', out], stub)
   assert.equal(r.code, 1); assert.match(r.err, /two different records for 100\/1\/1/)
+})
+
+// ---- review 207 ----
+test('every wrapper field the CI summary checks is checked here too', () => {
+  const bad = {
+    exitCode: 1, signal: 'SIGKILL', cleanup: 'unconfirmed', status: 'timeout',
+    truncated: { stdout: true, stderr: false }, descendantsKilled: true, problems: ['x'],
+  }
+  for (const [field, value] of Object.entries(bad)) {
+    const h = parseAdvisory(report({ claude: wrapper('claude', { [field]: value }) })).claude
+    assert.equal(h.valid, false, field)
+  }
+  assert.equal(parseAdvisory(report({ claude: wrapper('claude', { truncated: undefined }) })).claude.valid, false) // truncation not ruled out
+  assert.equal(parseAdvisory(report({ claude: wrapper('claude', { problems: undefined }) })).claude.valid, false)
+  assert.equal(parseAdvisory(report()).claude.valid, true)
+})
+
+test('timestamp-only lines (blank report lines) are cleaned without trailing spaces', () => {
+  const blank = report().split('\n').map((l) => l.replace(/Z $/, 'Z')).join('\n')
+  assert.equal(parseAdvisory(blank).claude.valid, true)
+  assert.equal(parseAdvisory(blank).verdict, 'admissible')
+})
+
+test('duplicate keys inside one incoming batch: identical are skipped, different are a conflict', () => {
+  const a = row({ key: '5/1/5' })
+  const same2 = merge('', [a, { ...a }], 't')
+  assert.equal(same2.added, 1); assert.equal(same2.skipped, 1); assert.equal(same2.text.split('\n').filter(Boolean).length, 1)
+  const diff = merge('', [a, { ...a, conclusion: 'failure' }], 't')
+  assert.deepEqual(diff.conflicts, ['5/1/5']); assert.equal(diff.text, ''); assert.deepEqual(diff.newRows, [])
+})
+
+test('the state after installing the archive but before removing the plain file reads once and recovers without duplicates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-renamed-'))
+  const r1 = { ...row({ key: '1/1/1', runId: 1 }), runCreatedAt: '2026-10-01T00:00:00Z', harvestedAt: 'a' }, r2 = { ...row({ key: '2/1/2', runId: 2, jobId: 2 }), runCreatedAt: '2026-10-02T00:00:00Z', harvestedAt: 'a' }
+  const text = JSON.stringify(r1) + '\n' + JSON.stringify(r2) + '\n'
+  writeFileSync(join(dir, 'append-2026-10.jsonl.gz'), gzipSync(text)) // the archive already holds both rows ...
+  writeFileSync(join(dir, 'append-2026-10.jsonl'), text) // ... and the plain file still does
+  assert.equal(readDataset(dir).split('\n').filter(Boolean).length, 2) // one logical row per key, before any recovery
+  assert.equal(toTsv(readDataset(dir)).trim().split('\n').length, 3) // header + 2 rows
+  assert.equal(compact(dir, '2026-11-15T00:00:00Z'), 1)
+  assert.deepEqual(readdirSync(dir), ['append-2026-10.jsonl.gz'])
+  assert.equal(gunzipSync(readFileSync(join(dir, 'append-2026-10.jsonl.gz'))).toString(), text) // nothing appended a second time
+})
+
+test('a plain file and its archive that disagree about a key stop compaction and keep both files', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-disagree-'))
+  const k = (c) => JSON.stringify({ ...rowAt('1/1/1', '2026-10-01T00:00:00Z'), conclusion: c }) + '\n'
+  writeFileSync(join(dir, 'append-2026-10.jsonl.gz'), gzipSync(k('success')))
+  writeFileSync(join(dir, 'append-2026-10.jsonl'), k('failure'))
+  assert.throws(() => compact(dir, '2026-11-15T00:00:00Z'), /different records for 1\/1\/1/)
+  assert.deepEqual(readdirSync(dir).sort(), ['append-2026-10.jsonl', 'append-2026-10.jsonl.gz'])
+})
+
+test('a stop while replacing an archive leaves the old one readable, and the late row can be retried', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-atomic-'))
+  writeRows(dir, [rowAt('1/1/1', '2026-10-30T10:00:00Z')]); compact(dir, '2026-12-01T00:00:00Z')
+  const gz = join(dir, 'append-2026-10.jsonl.gz'), old = readFileSync(gz)
+  mkdirSync(gz + '.tmp') // the temporary file cannot be replaced: the write fails before the archive is touched
+  assert.throws(() => writeRows(dir, [rowAt('9/1/9', '2026-10-31T10:00:00Z')]))
+  assert.deepEqual(readFileSync(gz), old); assert.equal(readDataset(dir).split('\n').filter(Boolean).length, 1)
+  rmSync(gz + '.tmp', { recursive: true })
+  writeFileSync(gz + '.tmp', 'half a gzip member') // a leftover partial file from an earlier stop is simply replaced
+  writeRows(dir, [rowAt('9/1/9', '2026-10-31T10:00:00Z')])
+  assert.deepEqual(readDataset(dir).split('\n').filter(Boolean).map((l) => JSON.parse(l).key), ['1/1/1', '9/1/9'])
+  assert.equal(existsSync(gz + '.tmp'), false)
+})
+
+test('an archive that does not read back as expected is not installed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-verify-'))
+  const f = join(dir, 'x.gz'); writeFileSync(f, 'old')
+  assert.throws(() => replaceFile(f, Buffer.from('new'), () => false), /did not read back/)
+  assert.equal(readFileSync(f, 'utf8'), 'old'); assert.equal(existsSync(f + '.tmp'), false)
+})
+
+const manyJobs = (n, from) => Array.from({ length: n }, (_, i) => job(from + i, 'repo checks'))
+test('more than 100 jobs in an attempt are all read; a count that does not add up fails closed', async () => {
+  const resp = base()
+  const j = `repos/${R}/actions/runs/100/attempts/1/jobs`
+  resp[j] = { total_count: 150, jobs: manyJobs(100, 1000) }
+  resp[j + '?per_page=100&page=2'] = { total_count: 150, jobs: [job(1, 'append measurement (ubuntu-latest)'), job(2, 'plugins (macos-latest)', { conclusion: 'failure' }), ...manyJobs(48, 2000)] }
+  const { dir, stub } = makeEnv(resp)
+  const out = join(dir, 'ds')
+  const ok = await runCli(['--repo', R, '--out-dir', out], stub)
+  assert.equal(ok.code, 0, ok.err); assert.match(ok.out, /4 added/) // jobs 1 and 2 sit on page 2
+  const lying = makeEnv({ ...resp, [j]: { total_count: 151, jobs: manyJobs(100, 1000) }, [j + '?per_page=100&page=2']: { ...resp[j + '?per_page=100&page=2'], total_count: 151 } })
+  const out2 = join(lying.dir, 'ds')
+  const bad = await runCli(['--repo', R, '--out-dir', out2], lying.stub)
+  assert.equal(bad.code, 1); assert.match(bad.err, /refusing a partial harvest/); assert.deepEqual(readdirSync(out2), [])
+  const moving = makeEnv({ ...resp, [j]: { total_count: 151, jobs: manyJobs(100, 1000) } }) // page 1 says 151, page 2 says 150
+  const bad2 = await runCli(['--repo', R, '--out-dir', join(moving.dir, 'ds')], moving.stub)
+  assert.equal(bad2.code, 1); assert.match(bad2.err, /total changed from 151 to 150/)
+})
+
+test('more than 100 runs are read when the limit asks for them', async () => {
+  const resp = base()
+  const runs = `repos/${R}/actions/workflows/ci.yml/runs`
+  const mk = (id) => ({ id, run_attempt: 1, event: 'push', head_sha: 'd'.repeat(40), created_at: '2026-11-24T00:00:00Z' })
+  resp[runs] = { workflow_runs: Array.from({ length: 100 }, (_, i) => mk(200 + i)) }
+  resp[runs + '?per_page=100&page=2'] = { workflow_runs: [mk(100)] }
+  resp[`repos/${R}/actions/runs/`] = { jobs: [] } // every filler run has no jobs
+  const { dir, stub } = makeEnv(resp)
+  const out = join(dir, 'ds')
+  const r = await runCli(['--repo', R, '--out-dir', out, '--limit', '101'], stub)
+  assert.equal(r.code, 0, r.err); assert.match(r.out, /harvested 2 job records/) // run 100 attempt 1 is on page 2: its jobs 1 and 2
+  assert.ok(readDataset(out).includes('"runId":100'))
+})
+
+test('a held lock stops a second harvest before it reads or writes; the lock is released after success and after failure', async () => {
+  const { dir, stub } = makeEnv(base())
+  const out = join(dir, 'ds')
+  const release = lockDataset(out)
+  assert.throws(() => lockDataset(out), /another harvest is running/)
+  const blocked = await runCli(['--repo', R, '--out-dir', out], stub)
+  assert.equal(blocked.code, 1); assert.match(blocked.err, /another harvest is running/)
+  assert.deepEqual(readdirSync(out), ['.harvest.lock'])
+  release()
+  assert.equal((await runCli(['--repo', R, '--out-dir', out], stub)).code, 0); assert.ok(!readdirSync(out).includes('.harvest.lock'))
+  const resp = base(); resp[`repos/${R}/actions/runs/100/attempts/1/jobs`].jobs[0].conclusion = 'failure'
+  writeFileSync(join(dir, 'responses.json'), JSON.stringify(resp))
+  assert.equal((await runCli(['--repo', R, '--out-dir', out], stub)).code, 1) // a conflict
+  assert.ok(!readdirSync(out).includes('.harvest.lock'))
+})
+
+test('two harvests started together never store a key twice', async () => {
+  const { dir, stub } = makeEnv(base())
+  const out = join(dir, 'ds')
+  const [a, b] = await Promise.all([runCli(['--repo', R, '--out-dir', out], stub), runCli(['--repo', R, '--out-dir', out], stub)])
+  for (const x of [a, b]) assert.ok(x.code === 0 || /another harvest is running/.test(x.err), x.err)
+  assert.ok(a.code === 0 || b.code === 0)
+  const keys = readDataset(out).split('\n').filter(Boolean).map((l) => JSON.parse(l).key)
+  assert.equal(keys.length, 4); assert.equal(new Set(keys).size, 4)
+  const raw = readdirSync(out).filter((n) => n.endsWith('.jsonl')).map((n) => readFileSync(join(out, n), 'utf8').split('\n').filter(Boolean).length)
+  assert.equal(raw.reduce((x, y) => x + y, 0), 4) // also on disk, not only after the reader's de-duplication
 })
