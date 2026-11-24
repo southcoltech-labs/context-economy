@@ -115,3 +115,43 @@ jobs:
         with:
           bun-version: "1.4.4" # the version the Pi tests were written against
       - run: bun test extensions
+
+  # Advisory placement experiment (bench/README.md). NOT a required check and not the official benchmark: it runs after both official matrices
+  # have finished, whatever their result, on its own runner, and reports both host measurements. It is red when a record is missing or invalid.
+  append-measurement:
+    name: append measurement (${{ matrix.os }})
+    needs: [plugins, pi]
+    if: ${{ !cancelled() }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.4"
+      - name: Install Claude Code
+        run: |
+          npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          cd "$(npm root -g)/@anthropic-ai/claude-code" && node install.cjs
+          claude --version
+      - name: Runner metadata
+        if: ${{ !cancelled() }}
+        run: node bench/runner-meta.mjs > "$RUNNER_TEMP/meta.json"
+      - name: Claude append measurement
+        if: ${{ !cancelled() }}
+        run: node bench/run.mjs claude --deadline-ms 240000 > "$RUNNER_TEMP/claude.out"
+      - name: Pi append measurement
+        if: ${{ !cancelled() }}
+        run: node bench/run.mjs pi --deadline-ms 240000 > "$RUNNER_TEMP/pi.out"
+      - name: Report
+        if: ${{ !cancelled() }}
+        run: node bench/summarize.mjs "$RUNNER_TEMP" # appends to the job summary itself; a pipe would hide its exit status
