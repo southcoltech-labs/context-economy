@@ -61,3 +61,19 @@ The runner fixtures are written for Node and are named `.fixture.mjs` so that `b
 Any truncation of the captured output (more than 200,000 bytes on stdout or stderr) makes the run `invalid`: uniqueness of the record cannot
 be established over discarded bytes. A signal that arrives during the synchronous plugin copy is serviced when the copy returns, before any
 launch; the copy itself is not interruptible.
+
+## Harvesting results from CI
+
+`bench/harvest.mjs` collects the evidence from past runs into a durable, append-only dataset. It is read-only: it only calls `gh api` GET endpoints (list runs, list the jobs of every attempt, download job logs) and writes only the files you name.
+
+```sh
+node bench/harvest.mjs --repo OWNER/REPO --out data.jsonl --tsv data.tsv --since 2026-11-24T00:00:00Z --limit 50
+```
+
+- Workflow logs expire (GitHub's default is 90 days; this repository's setting is not verified), so harvest soon after runs finish. Keep the dataset somewhere reviewable that is not this repository's source tree.
+- For each completed run **and each attempt** it records every `append measurement (<os>)` job (metadata and both host status lines kept verbatim, each host re-validated with the runner's `validateRecord`, plus the report verdict) and the three round p95s printed by the official benchmark in the `plugins (<os>)` and `pi (<os>)` jobs. A job whose log has no usable report, was cancelled or can no longer be downloaded is recorded as well, so missing observations stay visible.
+- `data.jsonl` is the source of truth: one object per job per attempt, keyed `runId/attempt/jobId`. An existing key is never replaced. The same content is skipped, different content is a conflict, and the command exits 1 without writing anything. A rerun of a job is a new attempt and so a new key.
+- `--tsv` rewrites a derived table from the whole JSONL: one row per pair for each host, one row per official job, and one row for each missing observation.
+- Anything that cannot be parsed is stored as such (`valid: false` with the problems), never dropped or repaired. The numbers are exploratory, not a gate and not a threshold.
+
+`node --test bench/fixtures/harvest.fixture.mjs` runs the parser, merge and CLI fixtures against a stand-in `gh` that records every call (a test asserts that none uses a method, field or body option). `real-report.log` is the report step of a real hosted run.
