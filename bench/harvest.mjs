@@ -3,7 +3,7 @@
 //
 // Read-only harvest of append-measurement evidence from GitHub Actions logs into a durable, append-only dataset.
 //
-//   node bench/harvest.mjs --repo OWNER/REPO --out data.jsonl [--tsv data.tsv] [--since 2026-11-24T00:00:00Z] [--limit 50] [--workflow ci.yml]
+//   node bench/harvest.mjs --repo OWNER/REPO --out-dir DIR [--tsv data.tsv] [--since 2026-11-24T00:00:00Z] [--limit 50] [--workflow ci.yml]
 //
 // Workflow logs expire (GitHub's default is 90 days; this repository's setting is not verified), so harvest promptly. Nothing here writes to
 // GitHub: it only calls `gh api` for GET endpoints (list runs, list jobs for each attempt, download job logs).
@@ -12,11 +12,16 @@
 //     validateRecord() the runner uses, plus the report verdict; a job with no usable report is recorded too (with its conclusion), because
 //     a missing or cancelled observation is part of the cohort;
 //   - each `plugins (<os>)` and `pi (<os>)` job: the three round p95s printed by the official benchmark test, if the log has them.
-// The dataset is JSONL, one object per job per attempt, keyed by run id + attempt + job id. A key that is already present is never replaced:
-// identical content is skipped, different content is a conflict and the run fails without writing. `--tsv` derives one row per pair
-// (and one per official benchmark job) from the dataset; the JSONL stays the source of truth.
+// The dataset is a directory of monthly JSONL files `append-YYYY-MM.jsonl`, one object per job per attempt, keyed by run id + attempt + job id.
+// A row goes to the file of the (UTC) month its run was created in, so a rerun lands beside the original. A key already present anywhere in the
+// directory is never replaced: identical content is skipped, different content is a conflict and the run fails without writing. A file for a
+// month that has ended is gzipped to `append-YYYY-MM.jsonl.gz` (checked by decompressing before the plain file is removed); a late row for an
+// archived month is added as one more gzip member, which gunzip reads as part of the same file. `--tsv` derives one row per pair (and one per
+// official benchmark job) from the whole directory; the JSONL files stay the source of truth.
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { validateRecord } from './run-lib.mjs'
@@ -130,7 +135,12 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 /** Merges new rows into the existing JSONL text. Returns { text, added, skipped, conflicts }; never replaces an existing key. */
 export function merge(existingText, rows, harvestedAt) {
   const have = new Map()
-  for (const line of existingText.split('\n').filter(Boolean)) { const o = JSON.parse(line); have.set(o.key, o) }
+  for (const line of existingText.split('\n').filter(Boolean)) {
+    const o = JSON.parse(line)
+    const prev = have.get(o.key)
+    if (prev) { const { harvestedAt: _a, ...x } = prev, { harvestedAt: _b, ...y } = o; if (!same(x, y)) throw new Error(`the dataset holds two different records for ${o.key}`) }
+    have.set(o.key, o)
+  }
   const add = [], conflicts = []
   let skipped = 0
   for (const row of rows) {
@@ -139,7 +149,60 @@ export function merge(existingText, rows, harvestedAt) {
     const { harvestedAt: _drop, ...rest } = prev
     if (same(rest, row)) skipped++; else conflicts.push(row.key)
   }
-  return { added: add.length, skipped, conflicts, text: conflicts.length ? existingText : existingText + add.map((o) => JSON.stringify(o) + '\n').join('') }
+  return { added: add.length, skipped, conflicts, newRows: conflicts.length ? [] : add, text: conflicts.length ? existingText : existingText + add.map((o) => JSON.stringify(o) + '\n').join('') }
+}
+
+// ---- the monthly files ----
+const FILE = /^append-(\d{4}-\d{2})\.jsonl(\.gz)?$/
+export const monthOf = (row) => {
+  const m = /^(\d{4}-\d{2})-\d{2}T/.exec(String(row.runCreatedAt))
+  if (!m) throw new Error(`run ${row.runId} has no usable creation date`)
+  return m[1]
+}
+
+/** The whole dataset as one text, in file-name order. Each file must be empty or end with a newline. */
+export function readDataset(dir) {
+  if (!existsSync(dir)) return ''
+  let text = ''
+  for (const name of readdirSync(dir).filter((n) => FILE.test(n)).sort()) {
+    const buf = readFileSync(join(dir, name))
+    const t = (name.endsWith('.gz') ? gunzipSync(buf) : buf).toString('utf8')
+    if (t && !t.endsWith('\n')) throw new Error(`${name} does not end with a newline`)
+    text += t
+  }
+  return text
+}
+
+/** Adds rows to the file of their month: appended to the plain file, or as one more gzip member when that month is already archived. */
+export function writeRows(dir, rows) {
+  mkdirSync(dir, { recursive: true })
+  const by = new Map()
+  for (const r of rows) { const m = monthOf(r); by.set(m, (by.get(m) ?? '') + JSON.stringify(r) + '\n') }
+  for (const [m, text] of by) {
+    const gz = join(dir, `append-${m}.jsonl.gz`)
+    if (existsSync(gz)) appendFileSync(gz, gzipSync(text)); else appendFileSync(join(dir, `append-${m}.jsonl`), text)
+  }
+}
+
+/** Gzips every plain monthly file older than the month of `nowIso`. The archive is read back before the plain file is removed. */
+export function compact(dir, nowIso) {
+  if (!existsSync(dir)) return 0
+  const current = nowIso.slice(0, 7)
+  let n = 0
+  for (const name of readdirSync(dir).sort()) {
+    const m = /^append-(\d{4}-\d{2})\.jsonl$/.exec(name)
+    if (!m || m[1] >= current) continue
+    const plain = join(dir, name), gz = join(dir, name + '.gz'), tmp = gz + '.tmp'
+    const text = readFileSync(plain)
+    const prior = existsSync(gz) ? readFileSync(gz) : Buffer.alloc(0)
+    writeFileSync(tmp, Buffer.concat([prior, gzipSync(text)]))
+    const want = Buffer.concat([prior.length ? gunzipSync(prior) : Buffer.alloc(0), text])
+    if (!gunzipSync(readFileSync(tmp)).equals(want)) { unlinkSync(tmp); throw new Error(`archive check failed for ${name}; the plain file is kept`) }
+    renameSync(tmp, gz)
+    unlinkSync(plain)
+    n++
+  }
+  return n
 }
 
 const TSV_COLS = ['source', 'runId', 'attempt', 'jobId', 'job', 'os', 'event', 'headSha', 'conclusion', 'verdict', 'host', 'hostValid', 'pair', 'order', 'appendP95', 'appendMedian', 'warmFullMedian', 'ratioP95OverWarmMedian', 'ratioMedianOverWarmMedian', 'coldMs', 'round1', 'round2', 'round3', 'collection', 'note']
@@ -171,14 +234,14 @@ export function toTsv(jsonl) {
 
 // ---- CLI ----
 function parseArgs(argv) {
-  const o = {}, known = new Set(['repo', 'out', 'tsv', 'since', 'limit', 'workflow'])
+  const o = {}, known = new Set(['repo', 'out-dir', 'tsv', 'since', 'limit', 'workflow'])
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i]?.replace(/^--/, '')
     if (!argv[i]?.startsWith('--') || !known.has(k) || argv[i + 1] === undefined || argv[i + 1].startsWith('--')) return { error: `bad or incomplete option ${argv[i]}` }
     o[k] = argv[i + 1]
   }
   if (!o.repo || !/^[\w.-]+\/[\w.-]+$/.test(o.repo)) return { error: '--repo OWNER/REPO is required' }
-  if (!o.out) return { error: '--out FILE.jsonl is required' }
+  if (!o['out-dir']) return { error: '--out-dir DIR is required' }
   if (o.limit !== undefined && !/^\d{1,4}$/.test(o.limit)) return { error: '--limit must be a positive integer' }
   if (o.since !== undefined && Number.isNaN(Date.parse(o.since))) return { error: '--since must be a date' }
   return { ...o, limit: o.limit ? Number(o.limit) : 50 }
@@ -187,15 +250,18 @@ function parseArgs(argv) {
 async function main() {
   const a = parseArgs(process.argv.slice(2))
   if (a.error) { console.error(a.error); return 2 }
-  const existing = existsSync(a.out) ? readFileSync(a.out, 'utf8') : ''
-  if (existing && !existing.endsWith('\n')) { console.error(`${a.out} does not end with a newline; not appending to it`); return 1 }
+  const dir = a['out-dir']
+  const now = process.env.BENCH_NOW || new Date().toISOString() // the variable exists for the fixtures
+  let existing
+  try { existing = readDataset(dir) } catch (e) { console.error(`cannot read the dataset: ${e.message}`); return 1 }
   let rows
   try { rows = await harvest({ ...a, log: (l) => console.error(l) }) } catch (e) { console.error('harvest failed: ' + String(e.stderr || e.message).slice(0, 500)); return 1 }
-  const m = merge(existing, rows, new Date().toISOString())
+  let m
+  try { m = merge(existing, rows, now) } catch (e) { console.error(`cannot merge: ${e.message}`); return 1 }
   if (m.conflicts.length) { console.error(`conflict: already recorded with different content, nothing written: ${m.conflicts.join(', ')}`); return 1 }
-  if (m.added) appendFileSync(a.out, m.text.slice(existing.length))
-  if (a.tsv) writeFileSync(a.tsv, toTsv(readFileSync(a.out, 'utf8')))
-  console.log(`harvested ${rows.length} job records: ${m.added} added, ${m.skipped} already present`)
+  let archived = 0
+  try { writeRows(dir, m.newRows); archived = compact(dir, now); if (a.tsv) writeFileSync(a.tsv, toTsv(readDataset(dir))) } catch (e) { console.error(`cannot write: ${e.message}`); return 1 }
+  console.log(`harvested ${rows.length} job records: ${m.added} added, ${m.skipped} already present, ${archived} month file(s) archived`)
   return 0
 }
 

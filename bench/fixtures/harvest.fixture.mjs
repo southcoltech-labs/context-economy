@@ -3,13 +3,14 @@
 // Fixtures for the read-only harvest (bench/harvest.mjs). Run: `node --test bench/fixtures/*.fixture.mjs`.
 // The CLI tests use a stand-in `gh` (BENCH_GH) that serves canned responses and records every call, so nothing touches GitHub.
 import { spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { merge, parseAdvisory, parseOfficial, toTsv } from '../harvest.mjs'
+import { compact, merge, monthOf, parseAdvisory, parseOfficial, readDataset, toTsv, writeRows } from '../harvest.mjs'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { goodRecord } from './helpers.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -108,8 +109,8 @@ process.stdout.write(typeof r[hit] === 'string' ? r[hit] : JSON.stringify(r[hit]
   chmodSync(stub, 0o755)
   return { dir, stub }
 }
-const runCli = (args, stub) => new Promise((resolve) => {
-  const p = spawn(process.execPath, [script, ...args], { env: { ...process.env, BENCH_GH: stub }, stdio: ['ignore', 'pipe', 'pipe'] })
+const runCli = (args, stub, now = '2026-11-25T00:00:00.000Z') => new Promise((resolve) => {
+  const p = spawn(process.execPath, [script, ...args], { env: { ...process.env, BENCH_GH: stub, BENCH_NOW: now }, stdio: ['ignore', 'pipe', 'pipe'] })
   let out = '', err = ''
   p.stdout.on('data', (c) => { out += c }); p.stderr.on('data', (c) => { err += c })
   p.on('close', (code) => resolve({ code, out, err }))
@@ -128,18 +129,19 @@ const base = () => ({
 
 test('the CLI harvests every attempt, skips non-measurement and unfinished jobs, records a lost log, and is idempotent', async () => {
   const { dir, stub } = makeEnv(base())
-  const out = join(dir, 'data.jsonl'), tsv = join(dir, 'data.tsv')
-  const a = await runCli(['--repo', R, '--out', out, '--tsv', tsv], stub)
+  const out = join(dir, 'ds'), tsv = join(dir, 'data.tsv')
+  const a = await runCli(['--repo', R, '--out-dir', out, '--tsv', tsv], stub)
   assert.equal(a.code, 0, a.err); assert.match(a.out, /harvested 4 job records: 4 added, 0 already present/)
-  const rows = readFileSync(out, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const rows = readDataset(out).split('\n').filter(Boolean).map((l) => JSON.parse(l))
   assert.deepEqual(rows.map((r) => r.key).sort(), ['100/1/1', '100/1/2', '100/2/5', '100/2/6'])
   assert.equal(rows.find((r) => r.jobId === 2).official.rounds[2], 32.34)
   assert.match(rows.find((r) => r.jobId === 6).logError, /410/); assert.equal(rows.find((r) => r.jobId === 6).conclusion, 'cancelled')
   assert.equal(rows.find((r) => r.jobId === 5).advisory.verdict, 'admissible')
   assert.ok(readFileSync(tsv, 'utf8').split('\n')[0].startsWith('source\trunId'))
-  const before = readFileSync(out, 'utf8')
-  const b = await runCli(['--repo', R, '--out', out], stub)
-  assert.equal(b.code, 0); assert.match(b.out, /0 added, 4 already present/); assert.equal(readFileSync(out, 'utf8'), before)
+  assert.deepEqual(readdirSync(out), ['append-2026-11.jsonl']) // all four runs were created in November
+  const before = readDataset(out)
+  const b = await runCli(['--repo', R, '--out-dir', out], stub)
+  assert.equal(b.code, 0); assert.match(b.out, /0 added, 4 already present/); assert.equal(readDataset(out), before)
   // read-only: every call is a plain `gh api ... GET path`, with no method, field or body options
   for (const line of readFileSync(join(dir, 'calls.log'), 'utf8').split('\n').filter(Boolean)) {
     const args = JSON.parse(line)
@@ -149,25 +151,82 @@ test('the CLI harvests every attempt, skips non-measurement and unfinished jobs,
 
 test('a record already stored with different content is a conflict: exit 1 and the file is unchanged', async () => {
   const { dir, stub } = makeEnv(base())
-  const out = join(dir, 'data.jsonl')
-  assert.equal((await runCli(['--repo', R, '--out', out], stub)).code, 0)
+  const out = join(dir, 'ds')
+  assert.equal((await runCli(['--repo', R, '--out-dir', out], stub)).code, 0)
   const resp = base(); resp[`repos/${R}/actions/runs/100/attempts/1/jobs`].jobs[0].conclusion = 'failure'
   writeFileSync(join(dir, 'responses.json'), JSON.stringify(resp))
-  const before = readFileSync(out, 'utf8')
-  const r = await runCli(['--repo', R, '--out', out], stub)
-  assert.equal(r.code, 1); assert.match(r.err, /conflict.*100\/1\/1/); assert.equal(readFileSync(out, 'utf8'), before)
+  const before = readDataset(out)
+  const r = await runCli(['--repo', R, '--out-dir', out], stub)
+  assert.equal(r.code, 1); assert.match(r.err, /conflict.*100\/1\/1/); assert.equal(readDataset(out), before)
 })
 
 test('bad arguments and a failing listing exit nonzero without writing', async () => {
   const { dir, stub } = makeEnv({})
-  const out = join(dir, 'data.jsonl')
-  for (const args of [[], ['--repo', 'nope', '--out', out], ['--repo', R], ['--repo', R, '--out', out, '--limit', 'x'], ['--repo', R, '--out', out, '--since', 'never'], ['--repo', R, '--out', out, '--bogus', '1'], ['--repo', R, '--out']]) {
+  const out = join(dir, 'ds')
+  for (const args of [[], ['--repo', 'nope', '--out-dir', out], ['--repo', R], ['--repo', R, '--out-dir', out, '--limit', 'x'], ['--repo', R, '--out-dir', out, '--since', 'never'], ['--repo', R, '--out-dir', out, '--bogus', '1'], ['--repo', R, '--out-dir']]) {
     assert.equal((await runCli(args, stub)).code, 2, JSON.stringify(args))
   }
-  const failed = await runCli(['--repo', R, '--out', out], stub) // the stub answers 404 for the run listing
+  const failed = await runCli(['--repo', R, '--out-dir', out], stub) // the stub answers 404 for the run listing
   assert.equal(failed.code, 1); assert.match(failed.err, /harvest failed/)
-  assert.throws(() => readFileSync(out), /ENOENT/)
-  mkdirSync(join(dir, 'x'))
-  writeFileSync(out, '{"key":"k"}') // no trailing newline: refuse to append to it
-  assert.equal((await runCli(['--repo', R, '--out', out], stub)).code, 1)
+  assert.equal(existsSync(out), false)
+  mkdirSync(out)
+  writeFileSync(join(out, 'append-2026-10.jsonl'), '{"key":"k"}') // no trailing newline: refuse to use it
+  assert.equal((await runCli(['--repo', R, '--out-dir', out], stub)).code, 1)
+})
+
+const rowAt = (key, created) => ({ key, runId: Number(key.split('/')[0]), runCreatedAt: created, source: 'official' })
+
+test('a row goes to the file of the UTC month its run was created in', () => {
+  assert.equal(monthOf({ runCreatedAt: '2026-12-31T23:59:59Z' }), '2026-12')
+  assert.equal(monthOf({ runCreatedAt: '2027-01-01T00:00:00Z' }), '2027-01')
+  assert.throws(() => monthOf({ runId: 5 }), /no usable creation date/)
+})
+
+test('closed months are gzipped and verified, the current month stays plain, and nothing is lost', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-rotate-'))
+  writeRows(dir, [rowAt('1/1/1', '2026-10-30T10:00:00Z'), rowAt('2/1/2', '2026-11-02T10:00:00Z'), rowAt('3/1/3', '2026-11-24T10:00:00Z'), rowAt('4/1/4', '2026-12-01T10:00:00Z')])
+  assert.deepEqual(readdirSync(dir).sort(), ['append-2026-10.jsonl', 'append-2026-11.jsonl', 'append-2026-12.jsonl'])
+  const before = readDataset(dir)
+  assert.equal(compact(dir, '2026-12-05T00:00:00Z'), 2) // October and November have ended
+  assert.deepEqual(readdirSync(dir).sort(), ['append-2026-10.jsonl.gz', 'append-2026-11.jsonl.gz', 'append-2026-12.jsonl'])
+  assert.equal(readDataset(dir), before)
+  assert.equal(compact(dir, '2026-12-05T00:00:00Z'), 0)
+})
+
+test('a late row for an archived month becomes one more gzip member and reads back with the rest', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-late-'))
+  writeRows(dir, [rowAt('1/1/1', '2026-10-30T10:00:00Z')])
+  compact(dir, '2026-12-01T00:00:00Z')
+  writeRows(dir, [rowAt('9/1/9', '2026-10-31T10:00:00Z')])
+  assert.deepEqual(readdirSync(dir), ['append-2026-10.jsonl.gz'])
+  assert.deepEqual(readDataset(dir).split('\n').filter(Boolean).map((l) => JSON.parse(l).key), ['1/1/1', '9/1/9'])
+  assert.equal(gunzipSync(readFileSync(join(dir, 'append-2026-10.jsonl.gz'))).toString().split('\n').filter(Boolean).length, 2)
+})
+
+test('a plain file left beside its archive (an interrupted compaction) is merged into the archive, not duplicated away', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'append-crash-'))
+  writeFileSync(join(dir, 'append-2026-10.jsonl.gz'), gzipSync(JSON.stringify(rowAt('1/1/1', '2026-10-01T00:00:00Z')) + '\n'))
+  writeFileSync(join(dir, 'append-2026-10.jsonl'), JSON.stringify(rowAt('2/1/2', '2026-10-02T00:00:00Z')) + '\n')
+  assert.equal(compact(dir, '2026-11-15T00:00:00Z'), 1)
+  assert.deepEqual(readdirSync(dir), ['append-2026-10.jsonl.gz'])
+  assert.equal(readDataset(dir).split('\n').filter(Boolean).length, 2)
+})
+
+test('an end-to-end harvest of an earlier month is archived in the same run, and a rerun adds nothing', async () => {
+  const { dir, stub } = makeEnv(base())
+  const out = join(dir, 'ds')
+  const a = await runCli(['--repo', R, '--out-dir', out], stub, '2026-12-03T00:00:00.000Z')
+  assert.equal(a.code, 0, a.err); assert.match(a.out, /4 added, 0 already present, 1 month file\(s\) archived/)
+  assert.deepEqual(readdirSync(out), ['append-2026-11.jsonl.gz'])
+  const b = await runCli(['--repo', R, '--out-dir', out], stub, '2026-12-04T00:00:00.000Z')
+  assert.match(b.out, /0 added, 4 already present, 0 month file/)
+})
+
+test('two different records for one key already in the dataset stop the harvest', async () => {
+  const { dir, stub } = makeEnv(base())
+  const out = join(dir, 'ds'); mkdirSync(out)
+  const k = (c) => JSON.stringify({ ...rowAt('100/1/1', '2026-11-24T00:00:00Z'), conclusion: c }) + '\n'
+  writeFileSync(join(out, 'append-2026-11.jsonl'), k('success') + k('failure'))
+  const r = await runCli(['--repo', R, '--out-dir', out], stub)
+  assert.equal(r.code, 1); assert.match(r.err, /two different records for 100\/1\/1/)
 })

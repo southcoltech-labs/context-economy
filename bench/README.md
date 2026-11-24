@@ -67,13 +67,14 @@ launch; the copy itself is not interruptible.
 `bench/harvest.mjs` collects the evidence from past runs into a durable, append-only dataset. It is read-only: it only calls `gh api` GET endpoints (list runs, list the jobs of every attempt, download job logs) and writes only the files you name.
 
 ```sh
-node bench/harvest.mjs --repo OWNER/REPO --out data.jsonl --tsv data.tsv --since 2026-11-24T00:00:00Z --limit 50
+node bench/harvest.mjs --repo OWNER/REPO --out-dir DIR --tsv data.tsv --since 2026-11-24T00:00:00Z --limit 50
 ```
 
 - Workflow logs expire (GitHub's default is 90 days; this repository's setting is not verified), so harvest soon after runs finish. Keep the dataset somewhere reviewable that is not this repository's source tree.
 - For each completed run **and each attempt** it records every `append measurement (<os>)` job (metadata and both host status lines kept verbatim, each host re-validated with the runner's `validateRecord`, plus the report verdict) and the three round p95s printed by the official benchmark in the `plugins (<os>)` and `pi (<os>)` jobs. A job whose log has no usable report, was cancelled or can no longer be downloaded is recorded as well, so missing observations stay visible.
-- `data.jsonl` is the source of truth: one object per job per attempt, keyed `runId/attempt/jobId`. An existing key is never replaced. The same content is skipped, different content is a conflict, and the command exits 1 without writing anything. A rerun of a job is a new attempt and so a new key.
-- `--tsv` rewrites a derived table from the whole JSONL: one row per pair for each host, one row per official job, and one row for each missing observation.
+- The dataset is a directory of monthly files, `append-YYYY-MM.jsonl`: one object per job per attempt, keyed `runId/attempt/jobId`, filed under the UTC month the run was created in (so a rerun lands beside its original). An existing key is never replaced. The same content is skipped, different content is a conflict, and the command exits 1 without writing anything. A rerun of a job is a new attempt and so a new key.
+- Rotation and compression: when a month has ended, its file is gzipped to `append-YYYY-MM.jsonl.gz`. The archive is read back and compared before the plain file is removed. A late row for an archived month is appended as another gzip member, which `gunzip`/`zcat` read as part of the same file. The current month stays plain text. Every run reads the whole directory, archives included, so the duplicate check covers all history.
+- `--tsv` rewrites a derived table from the whole directory: one row per pair for each host, one row per official job, and one row for each missing observation. A run is about 32 KB of JSONL and 5.5 KB of TSV (estimated from 5 real run attempts).
 - Anything that cannot be parsed is stored as such (`valid: false` with the problems), never dropped or repaired. The numbers are exploratory, not a gate and not a threshold.
 
 `node --test bench/fixtures/harvest.fixture.mjs` runs the parser, merge and CLI fixtures against a stand-in `gh` that records every call (a test asserts that none uses a method, field or body option). `real-report.log` is the report step of a real hosted run.
