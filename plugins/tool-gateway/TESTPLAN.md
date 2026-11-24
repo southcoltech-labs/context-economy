@@ -28,7 +28,7 @@ UTF-8 decoding, and the Pi-only tool changes.
 ## Live check: coverage and rewrites
 
 Use a disposable account or session with tool-gateway installed and RTK configured as in the
-[README](../../README.md#1-configure-rtk). On each host:
+[README](../../README.md#1-install-rtk). On each host:
 
 1. Note the newest ledger file, then make 20 distinct shell calls in the main thread and 20 in
    one subagent. Avoid calls that never reach the shell.
