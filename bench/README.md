@@ -61,3 +61,21 @@ The runner fixtures are written for Node and are named `.fixture.mjs` so that `b
 Any truncation of the captured output (more than 200,000 bytes on stdout or stderr) makes the run `invalid`: uniqueness of the record cannot
 be established over discarded bytes. A signal that arrives during the synchronous plugin copy is serviced when the copy returns, before any
 launch; the copy itself is not interruptible.
+
+## Harvesting results from CI
+
+`bench/harvest.mjs` collects the evidence from past runs into a durable, append-only dataset. It is read-only: it only calls `gh api` GET endpoints (list runs, list the jobs of every attempt, download job logs) and writes only the files you name.
+
+```sh
+node bench/harvest.mjs --repo OWNER/REPO --out-dir DIR --tsv data.tsv --since 2026-11-24T00:00:00Z --limit 50
+```
+
+- Workflow logs expire (GitHub's default is 90 days; this repository's setting is not verified), so harvest soon after runs finish. Keep the dataset somewhere reviewable that is not this repository's source tree.
+- For each completed run **and each attempt** it records every `append measurement (<os>)` job (metadata and both host status lines kept verbatim, each host re-validated with the same wrapper and record contract as the CI summary, `validateWrapper` and `validateRecord` in `run-lib.mjs`, plus the report verdict) and the three round p95s printed by the official benchmark in the `plugins (<os>)` and `pi (<os>)` jobs. A job whose log has no usable report, was cancelled or can no longer be downloaded is recorded as well, so missing observations stay visible.
+- The dataset is a directory of monthly files, `append-YYYY-MM.jsonl`: one object per job per attempt, keyed `runId/attempt/jobId`, filed under the UTC month the run was created in (so a rerun lands beside its original). An existing key is never replaced. The same content is skipped (also within one harvest), different content is a conflict, and the command exits 1 without writing anything. A rerun of a job is a new attempt and so a new key.
+- Rotation and compression: when a month has ended, its file is gzipped to `append-YYYY-MM.jsonl.gz`. Every file is replaced through a temporary file in the same folder and an archive is read back and compared before it is installed, so a stop leaves either the old file or the new one. If a stop happens after the archive is installed and before the plain file is removed, the reader counts each key once and the next run drops the plain rows the archive already holds (a plain and an archived record that disagree stop the run and keep both files). A late row for an archived month is appended as another gzip member, which `gunzip`/`zcat` read as part of the same file. The current month stays plain text. Every run reads the whole directory, archives included, so the duplicate check covers all history. The run list and the jobs of each attempt are read page by page, and the harvest stops, writing nothing, if a `total_count` is missing or changes between pages, an id shows up twice (the list moved while it was read), or a fully read list does not add up to the reported total.
+- One harvest at a time per directory: it takes a lock (`DIR/.harvest.lock`) and a second one stops at once. The lock is never broken automatically. If a harvest was killed, remove the lock by hand once no other harvest is running. Do not point two harvests at one directory from different machines over a synced folder; the lock is only as atomic as that file system.
+- `--tsv` rewrites a derived table from the whole directory: one row per pair for each host, one row per official job, and one row for each missing observation. A run is about 32 KB of JSONL and 5.5 KB of TSV (estimated from 5 real run attempts).
+- Anything that cannot be parsed is stored as such (`valid: false` with the problems), never dropped or repaired. The numbers are exploratory, not a gate and not a threshold.
+
+`node --test bench/fixtures/harvest.fixture.mjs` runs the parser, merge and CLI fixtures against a stand-in `gh` that records every call (a test asserts that none uses a method, field or body option). `real-report.log` is the report step of a real hosted run.
