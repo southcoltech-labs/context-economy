@@ -16,7 +16,7 @@ It starts no network connection or model call of its own. See [SECURITY.md](SECU
 | Item | Supported |
 | --- | --- |
 | OS | macOS on Apple silicon (arm64), Linux x86_64. Windows is not supported |
-| Coding agents | Claude Code or Pi, or both, installed before you start. Each release's notes list the versions it was tested with; `v0.1.2`: Claude Code 2.1.323 and 2.1.325, Pi 1.5.0 and 1.5.2 |
+| Coding agents | Claude Code or Pi, or both, installed before you start. Each release's proof in [`docs/release-proof/`](docs/release-proof/) records the host versions seen. `v0.2.2`: Claude Code 2.1.310 pinned and 2.1.330 recorded after the CLI's reported version changed during the run (see the proof's notes; not a full-run validation of either), Pi 1.5.0 on macOS and 1.6.0 on Linux (recovery after compaction was not re-checked on Pi 1.6.0) |
 | Node | 24 or later, as `package.json` `engines` declares. Tested with Pi installed from npm, which runs on the Node on your `PATH` |
 | Terminal width (context-bar) | 60 columns or more. Narrower windows shorten or drop header text (down to the title alone) and clip other lines; they are not guaranteed legible |
 | RTK | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 0.47.0 or later, below 1.0.0, at an absolute path you name. `brew install rtk` installs a 1.x release, which tool-gateway refuses: use the block below |
