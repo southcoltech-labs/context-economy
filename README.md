@@ -9,20 +9,6 @@ Plugins for Claude Code and extensions for Pi that cut context cost, and show wh
 
 It starts no network connection or model call of its own. See [SECURITY.md](SECURITY.md) for what it reads, writes and runs, and what stays on disk.
 
-## What it changes in each host
-
-- **Both hosts.** Before a shell command runs, tool-gateway asks RTK for a shorter-output equivalent (`rtk rewrite`) and runs that instead, with `rtk` bound to the verified path. If RTK is not configured or not trusted, answers late, or answers with anything outside a strict shell grammar, the original command runs. Every tool call adds one ledger row of metadata: names, ids, statuses, byte counts and timings, never command text or output.
-- **Claude Code.** Permission rules see the rewritten command, so a rule such as `Bash(git status:*)` no longer matches it and Claude Code asks for approval. Background Bash calls are never rewritten.
-- **Pi.** Besides the rewrite and the ledger, the extension:
-  - re-registers the built-in `edit` and `write` tools as sequential, so a batch that holds one runs in order (a test sent with an edit sees the edit);
-  - at session start, deactivates the tools `bg_task`, `bg_status`, `bg_task_list` and `bg_task_watch` if another package registered them (they duplicate single-purpose tools and add their schemas to every request). They stay registered; `setActiveTools` or `--tools` turns them back on.
-
-`CE_TOOL_GATEWAY=off` turns all of this off, on both hosts.
-
-**What the ledger does not measure.** Output is never shortened after a tool runs, so each row's `out_bytes_before` equals its `out_bytes_after`. Neither is what the output would have been without RTK, so the ledger is not a measure of savings. RTK's own `rtk gain` reports what its rewrites saved.
-
-**RTK's own integrations.** RTK has its own setup for both hosts (`rtk init -g` for Claude Code, `rtk init -g --agent pi` for Pi). If you only want shorter command output, that is the simpler choice. tool-gateway adds: RTK only from an absolute path you name, checked before every use; a strict grammar for what a rewrite may run; one metadata-only ledger across both hosts; and releases that are checked on both hosts before they reach the `release` channel. The output reduction itself is RTK's.
-
 **Status:** `v0.1.2` is the first public release. See [Releases and tags](#releases-and-tags) for which version to install.
 
 ## Supported environment
@@ -30,11 +16,14 @@ It starts no network connection or model call of its own. See [SECURITY.md](SECU
 | Item | Supported |
 | --- | --- |
 | OS | macOS on Apple silicon (arm64), Linux x86_64. Windows is not supported |
-| Hosts | Claude Code or Pi, or both, installed before you start. Each release's notes list the versions it was tested with; `v0.1.2`: Claude Code 2.1.323 and 2.1.325, Pi 1.5.0 and 1.5.2 |
+| Coding agents | Claude Code or Pi, or both, installed before you start. Each release's notes list the versions it was tested with; `v0.1.2`: Claude Code 2.1.323 and 2.1.325, Pi 1.5.0 and 1.5.2 |
+| Node | 24 or later, as `package.json` `engines` declares. Tested with Pi installed from npm, which runs on the Node on your `PATH` |
 | Terminal width (context-bar) | 60 columns or more. Narrower windows shorten or drop header text (down to the title alone) and clip other lines; they are not guaranteed legible |
-| RTK | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 0.47.0 or later, below 1.0.0, at an absolute path you name |
+| RTK | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) 0.47.0 or later, below 1.0.0, at an absolute path you name. `brew install rtk` installs a 1.x release, which tool-gateway refuses: use the block below |
 
-## 1. Configure RTK
+## 1. Install RTK
+
+Run this in a terminal, before you install the plugins. It is optional: without a trusted RTK, tool-gateway rewrites nothing (the ledger still works), so you only lose the shorter command output.
 
 RTK is never looked up on `PATH`. It must be an absolute path to a file owned by you or root that group and others cannot write; tool-gateway checks this with the system `stat` before every use. Without a trusted RTK, tool-gateway records its ledger and rewrites nothing.
 
@@ -64,7 +53,7 @@ RTK is never looked up on `PATH`. It must be an absolute path to a file owned by
 
 It must end by printing `rtk 0.47.0` and the path to put in `rtk.path`. A different program also called `rtk` (reachingforthejack/rtk) exists; the version check refuses it.
 
-**Name the path** in `~/.claude/context-economy/config.json`, which both hosts read. It must be absolute; `~` is not expanded:
+**Name the path** in `~/.claude/context-economy/config.json`, which both coding agents read. It must be absolute; `~` is not expanded:
 
 ```json
 {
@@ -86,7 +75,7 @@ claude plugin install tool-gateway@context-economy
 claude plugin install context-bar@context-economy     # optional: the context band
 ```
 
-Restart Claude Code. `#release` is the stable channel: it only ever moves to a version that passed the release checks.
+Start a new Claude Code session. `#release` is the stable channel: it only ever moves to a version that passed the release checks.
 
 **Pi:**
 
@@ -94,7 +83,21 @@ Restart Claude Code. `#release` is the stable channel: it only ever moves to a v
 pi install git:github.com/southcoltech-labs/context-economy@release
 ```
 
-Pi loads the tool-gateway and context-bar extensions from the package. Restart Pi.
+Pi loads the tool-gateway and context-bar extensions from the package. Start a new Pi session.
+
+## What it changes in each coding agent
+
+- **Both coding agents.** Before a shell command runs, tool-gateway asks RTK for a shorter-output equivalent (`rtk rewrite`) and runs that instead, with `rtk` bound to the verified path. If RTK is not configured or not trusted, answers late, or answers with anything outside a strict shell grammar, the original command runs. Every tool call adds one ledger row of metadata: names, ids, statuses, byte counts and timings, never command text or output.
+- **Claude Code.** Permission rules see the rewritten command, so a rule such as `Bash(git status:*)` no longer matches it and Claude Code asks for approval. Background Bash calls are never rewritten.
+- **Pi.** Besides the rewrite and the ledger, the extension:
+  - re-registers the built-in `edit` and `write` tools as sequential, so a batch that holds one runs in order (a test sent with an edit sees the edit);
+  - at session start, deactivates the tools `bg_task`, `bg_status`, `bg_task_list` and `bg_task_watch` if another package registered them (they duplicate single-purpose tools and add their schemas to every request). They stay registered; `setActiveTools` or `--tools` turns them back on.
+
+`CE_TOOL_GATEWAY=off` turns all of this off, on both coding agents.
+
+**What the ledger does not measure.** Output is never shortened after a tool runs, so each row's `out_bytes_before` equals its `out_bytes_after`. Neither is what the output would have been without RTK, so the ledger is not a measure of savings. RTK's own `rtk gain` reports what its rewrites saved.
+
+**RTK's own integrations.** RTK has its own setup for both coding agents (`rtk init -g` for Claude Code, `rtk init -g --agent pi` for Pi). If you only want shorter command output, that is the simpler choice. tool-gateway adds: RTK only from an absolute path you name, checked before every use; a strict grammar for what a rewrite may run; one metadata-only ledger across both coding agents; and releases that are checked on both coding agents before they reach the `release` channel. The output reduction itself is RTK's.
 
 ## 3. Update
 
@@ -109,7 +112,7 @@ claude plugin update tool-gateway@context-economy
 
 **Pi:** `pi update --extensions` (plain `pi update` updates only Pi itself).
 
-Restart the host after updating.
+Start a new session after updating.
 
 ## 4. Roll back to an earlier version
 
@@ -135,8 +138,8 @@ Your data is kept across rollback, update and uninstall: the gateway ledgers and
 
 ## 5. Turn off or uninstall
 
-- **Turn off the gateway:** set `CE_TOOL_GATEWAY=off` (Claude Code `settings.json` `env`, or the shell for Pi), then restart. On Pi this also leaves `edit`, `write` and the background tools as Pi and their packages define them. Removing `rtk.path` and `CE_RTK_BIN` stops rewriting but keeps the ledger.
-- **Turn off the context band:** set `CE_CONTEXT_BAR=off` the same way (only the exact value `off`), then restart.
+- **Turn off the gateway:** set `CE_TOOL_GATEWAY=off` (Claude Code `settings.json` `env`, or the shell for Pi), then start a new session. On Pi this also leaves `edit`, `write` and the background tools as Pi and their packages define them. Removing `rtk.path` and `CE_RTK_BIN` stops rewriting but keeps the ledger.
+- **Turn off the context band:** set `CE_CONTEXT_BAR=off` the same way (only the exact value `off`), then start a new session.
 - **Disable (Claude Code):** `claude plugin disable tool-gateway@context-economy` (and `context-bar@context-economy`).
 - **Uninstall (Claude Code):** `claude plugin uninstall tool-gateway@context-economy` and `claude plugin uninstall context-bar@context-economy`, or remove everything with `claude plugin marketplace remove context-economy`.
 - **Uninstall (Pi):** `pi remove git:github.com/southcoltech-labs/context-economy` (with or without the `@…` you installed).

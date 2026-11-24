@@ -13,7 +13,7 @@ It does not change tool output. Output admission is not in this release.
 
 ## Setup
 
-Install and configure RTK as in the [main README](../../README.md#1-configure-rtk): `rtk.path` in `~/.claude/context-economy/config.json`, or `CE_RTK_BIN`. The gateway never searches `PATH`.
+Install and configure RTK as in the [main README](../../README.md#1-install-rtk): `rtk.path` in `~/.claude/context-economy/config.json`, or `CE_RTK_BIN`. The gateway never searches `PATH`.
 
 ## Common questions
 

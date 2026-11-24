@@ -11,7 +11,7 @@ issue.
 | Node.js | 24 or later | Release tooling and its tests |
 | Claude Code | 2.1.310, the version CI pins | `claude plugin validate`, `claude plugin test` |
 | Bun | 1.4.4 | The Pi extension's tests |
-| RTK | 0.47.0 | Trying the gateway by hand ([README](README.md#1-configure-rtk)) |
+| RTK | 0.47.0 | Trying the gateway by hand ([README](README.md#1-install-rtk)) |
 
 ## Tests
 
