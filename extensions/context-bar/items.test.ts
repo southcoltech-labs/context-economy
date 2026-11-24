@@ -246,8 +246,8 @@ describe('Pi cache validity covers classification, pairing and argument size', (
   })
 
   const wide = (): Record<string, string> => Object.fromEntries(Array.from({ length: 1000 }, (_, k) => ['f' + k, 'v' + k]))
-  const GROSS_BREACH_MS = 60 // roughly 2.4x the former 25 ms budget and above every shared-runner value seen so far (max 47.49 ms)
-const gcAvailable = typeof (globalThis as { Bun?: { gc?: unknown } }).Bun?.gc === 'function'
+  const GROSS_BREACH_MS = 60 // a coarse policy ceiling, above the highest best-of-three value recorded on shared runners (47.49 ms); not a measured boundary, not a latency budget
+  const gcAvailable = typeof (globalThis as { Bun?: { gc?: unknown } }).Bun?.gc === 'function'
   const collect = (): void => { (globalThis as { Bun?: { gc?: (sync: boolean) => void } }).Bun?.gc?.(true) }
 
   test('an append does not read the old arguments again: reads of 500 wide argument objects stay a few per call, not a thousand', () => {
