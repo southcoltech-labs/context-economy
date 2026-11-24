@@ -42,8 +42,9 @@ RTK is never looked up on `PATH`. It must be an absolute path to a file owned by
   cd "$HOME/.local/opt/rtk-$v"
   curl -fsSLO "https://github.com/rtk-ai/rtk/releases/download/v$v/$asset"
   curl -fsSLO "https://github.com/rtk-ai/rtk/releases/download/v$v/checksums.txt"
-  line=$(grep -E "^[0-9a-f]{64}  $asset\$" checksums.txt) || { echo "no checksum for $asset" >&2; exit 1; }
-  printf '%s\n' "$line" | verify
+  line=$(grep -E "^[0-9a-f]{64}[ *]+$asset\$" checksums.txt) || { echo "no checksum for $asset" >&2; exit 1; }
+  [ "$(printf '%s\n' "$line" | wc -l | tr -d ' ')" = 1 ] || { echo "ambiguous checksum for $asset" >&2; exit 1; }
+  printf '%s  %s\n' "${line%%[ *]*}" "$asset" | verify
   tar -xzf "$asset" rtk
   chmod 755 rtk
   ./rtk --version

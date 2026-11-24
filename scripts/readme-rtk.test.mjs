@@ -69,16 +69,18 @@ function runBlock(shell, { os = "Darwin", arch = "arm64", files }) {
 /**
  * One case. The archive's `rtk` leaves a marker when run; checksums.txt holds its real hash.
  * `tamper` alters the served archive after hashing, `dropEntry` removes its checksum line,
- * `dropAsset` makes its download fail.
+ * `dropAsset` makes its download fail, `dup` adds a second entry for the asset with another hash (before or after the real one), `sep` is what separates the hash from the name in checksums.txt.
  */
-function scenario(shell, { asset = MAC, tamper = false, dropEntry = false, dropAsset = false } = {}, platform = {}) {
+function scenario(shell, { asset = MAC, tamper = false, dropEntry = false, dropAsset = false, sep = "  ", dup = "" } = {}, platform = {}) {
   const marker = join(mkdtempSync(join(tmpdir(), "readme-rtk-case-")), "RAN");
   const real = mkdtempSync(join(tmpdir(), "rtk-real-"));
   archive(real, asset, marker);
   const files = {
     "checksums.txt": (to) => writeFileSync(to, [
       `${"0".repeat(64)}  rtk-x86_64-pc-windows-msvc.zip`,
-      ...(dropEntry ? [] : [`${sha256(join(real, asset))}  ${asset}`]),
+      ...(dup === "before" ? [`${"b".repeat(64)} *${asset}`] : []),
+      ...(dropEntry ? [] : [`${sha256(join(real, asset))}${sep}${asset}`]),
+      ...(dup === "after" ? [`${"b".repeat(64)} *${asset}`] : []),
       "",
     ].join("\n")),
   };
@@ -100,6 +102,30 @@ for (const [shell, path] of SHELLS) {
     assert.match(r.out, /rtk\.path: .*\/\.local\/opt\/rtk-0\.47\.0\/rtk/);
     assert.match(r.calls, /^shasum$/m);
   });
+
+  for (const [label, sep] of [["one space", " "], ["a binary-mode marker", " *"], ["three spaces", "   "]]) {
+    test(`${shell}: a checksums.txt line with ${label} between hash and name still verifies`, { skip: !TOOLS.shasum && "no shasum" }, () => {
+      const r = scenario(path, { sep });
+      assert.equal(r.code, 0, r.out);
+      assert.ok(r.extracted);
+    });
+  }
+
+  test(`${shell}: a collapsed-space line for a tampered archive is still refused`, { skip: !TOOLS.shasum && "no shasum" }, () => {
+    const r = scenario(path, { sep: " ", tamper: true });
+    assert.notEqual(r.code, 0, r.out);
+    assert.equal(r.extracted, false, r.out);
+  });
+
+  for (const dup of ["before", "after"]) {
+    test(`${shell}: a second checksum entry for the asset (${dup} the real one) is refused and nothing is unpacked`, { skip: !TOOLS.shasum && "no shasum" }, () => {
+      const r = scenario(path, { dup });
+      assert.notEqual(r.code, 0, r.out);
+      assert.match(r.out, /ambiguous checksum for/);
+      assert.equal(r.extracted, false, r.out);
+      assert.equal(r.ran, false, r.out);
+    });
+  }
 
   const refusals = [
     ["a checksum mismatch", { tamper: true }, {}, /FAILED|did NOT match/],
