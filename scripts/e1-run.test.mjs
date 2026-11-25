@@ -1477,7 +1477,7 @@ const OTHER_EVID = { kind: "behaviour", command: "echo hi", result: 2, ledgerDir
 const OTHER = { plugin: "other", kind: "call", evidence: OTHER_EVID };
 const multiStep = (entries, extra = {}, human = {}) => [{ id: "H", human: { host: "pi", say: ["do it"], entries, ...human }, ...extra }];
 /** Answers by question: the call questions as DEFAULT_ANSWERS, "yes" to each statement, a description. */
-const MULTI_ANSWERS = (q) => (/^Did you see/.test(q) ? "yes" : /^Describe/.test(q) ? "a bar above the prompt" : /result/i.test(q) ? "1" : /permission prompt/i.test(q) ? "no prompt" : "git status");
+const MULTI_ANSWERS = (q) => (/^Did you see/.test(q) ? "yes" : /^Your answer to/.test(q) ? "confirm" : /^Describe/.test(q) ? "a bar above the prompt" : /result/i.test(q) ? "1" : /permission prompt/i.test(q) ? "no prompt" : "git status");
 
 test("several entries: the call questions come first, then the statements; every answer is labelled; one verdict line per entry", async () => {
   const w = world();
@@ -1485,11 +1485,11 @@ test("several entries: the call questions come first, then the statements; every
   w.answer = MULTI_ANSWERS;
   w.parts.e1a = () => multiStep([BAR, GATE]);
   assert.equal(await e1a(w), 0, w.err.join("\n"));
-  assert.deepEqual(w.asked.map((q) => q.replace(/^(.{14}).*$/, "$1")), ["What did you t", "What command d", "What was the r", "Did a permissi", "Did you see: a", "Did you see: t", "Describe in a "]);
+  assert.deepEqual(w.asked.map((q) => q.replace(/^(.{14}).*$/, "$1")), ["What did you t", "What command d", "What was the r", "How many permi", "Did you see: a", "Did you see: t", "Describe in a "]);
   const t = raw(w);
   assert.match(t, /\[planned H: pi bar visual; pi gate call\]/);
   assert.match(t, /ATTESTED H gate Q: What did you type\?/);
-  assert.match(t, /ATTESTED H bar Q: Did you see: a coloured bar above the prompt\? \(yes\/no\)\nATTESTED H bar A: yes/);
+  assert.match(t, /ATTESTED H bar Q: Did you see: a coloured bar above the prompt\? \("yes" or "no"\)\nATTESTED H bar A: yes/);
   assert.match(t, /ATTESTED H bar A: a bar above the prompt/);
   assert.match(t, /\[evidence H \(pi, gate call\): attested pass\]/);
   assert.match(t, /\[evidence H \(pi, bar visual\): attested pass\]/);
@@ -1507,13 +1507,44 @@ test("a valid `no` fails the entry at once, is never asked again, and the stop n
   assert.match(e, /bar visual: the operator did not see: a coloured bar above the prompt/);
   assert.match(raw(w), /ATTESTED H bar A: no/);
 });
+test("a changed answer is marked at once, listed in a block, and counted on the last line", async () => {
+  const w = world();
+  const script = ["no", "correct", "yes", "I misread the question"]; // for the first statement only
+  w.answer = (q) => (/^(Did you see: a coloured|Your answer to "a coloured|Why did you change)/.test(q) ? script.shift() : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  const t = raw(w);
+  assert.match(t, /\[answer changed H: "a coloured bar above the prompt": no -> yes; reason: I misread the question\]/);
+  assert.match(t, /=== answers changed after confirmation ===\nH: "a coloured bar above the prompt": no -> yes; reason: I misread the question/);
+  assert.equal(t.trimEnd().split("\n").at(-1), "1 host step, 1 attested, 1 answer changed after confirmation");
+});
+test("a changed answer followed by a later stop is still listed and counted", async () => {
+  const w = world();
+  const script = ["no", "correct", "yes", "misread"];
+  w.answer = (q) => (/^(Did you see: a coloured|Your answer to "a coloured|Why did you change)/.test(q) ? script.shift() : /^Did you see: the bar shrank/.test(q) ? "no" : /^Your answer to/.test(q) ? "confirm" : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 1);
+  const t = raw(w);
+  assert.match(t, /=== answers changed after confirmation ===\nH: "a coloured bar above the prompt": no -> yes; reason: misread/);
+  assert.equal(t.trimEnd().split("\n").at(-1), "1 host step, 1 attested, 1 answer changed after confirmation");
+});
+test("a changed answer followed by an interrupt is still listed", async () => {
+  const w = world();
+  const script = ["no", "correct", "yes", "misread"];
+  w.answer = (q) => { if (/^(Did you see: a coloured|Your answer to "a coloured|Why did you change)/.test(q)) return script.shift(); if (/^Did you see: the bar shrank/.test(q)) throw new AbortError("interrupted at the prompt"); return MULTI_ANSWERS(q); };
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 130);
+  const t = raw(w);
+  assert.match(t, /=== answers changed after confirmation ===/);
+  assert.equal(t.trimEnd().split("\n").at(-1), "1 answer changed after confirmation");
+});
 test("an answer that is neither yes nor no is asked again; every try is in the transcript; three bad tries fail", async () => {
   const w = world();
   let n = 0;
   w.answer = (q) => (/^Did you see: a coloured/.test(q) ? ["maybe", "yes"][n++] : MULTI_ANSWERS(q));
   w.parts.e1a = () => multiStep([BAR]);
   assert.equal(await e1a(w), 0, w.err.join("\n"));
-  assert.match(raw(w), /ATTESTED H A: maybe\nATTESTED H Q: Did you see: a coloured bar above the prompt\? \(yes\/no\)\nATTESTED H A: yes/);
+  assert.match(raw(w), /ATTESTED H A: maybe\nATTESTED H Q: Did you see: a coloured bar above the prompt\? \("yes" or "no"\)\nATTESTED H A: yes/);
   const w2 = world();
   w2.answer = (q) => (/^Did you see: a coloured/.test(q) ? "maybe" : MULTI_ANSWERS(q));
   w2.parts.e1a = () => multiStep([BAR]);
@@ -1648,7 +1679,7 @@ test("review 144 P2-1: a placeholder that also carries run, human or expect fiel
     assert.ok(!w.execs.some((e) => e.cmd === "never"));
   }
 });
-const visualModule = (dirs) => ({ name: "tool-gateway", hosts: ["claude", "pi"], ledgerDirs: dirs, behaviour: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["a band"] })), uninstall: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["no band"] })), dataLeft: [] });
+const visualModule = (dirs) => ({ name: "tool-gateway", hosts: ["claude", "pi"], ledgerDirs: dirs, behaviour: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["a band"] })), uninstall: ["claude", "pi"].map((h) => ({ host: h, kind: "visual", say: [], expect: ["the area above the prompt is empty"] })), dataLeft: [] });
 async function loadVisual(dirs) {
   const dir = tmp("e1-vis-");
   writeFileSync(join(dir, "tool-gateway.mjs"), `export default ${JSON.stringify(visualModule(dirs))};\n`);
@@ -1660,4 +1691,12 @@ test("review 144 P2-2: a visual-only module's retained ledger folder is validate
   for (const bad of ["../../outside", "/etc", ".claude/../../x", ".", "./a", ".claude/context-economy/..", "a//b", "", "A/b", ".claude/context-economy/a..b"]) {
     await assert.rejects(loadVisual({ claude: bad }), (e) => e.name === "StopError" || /StopError/.test(e.constructor.name), `rejects ${JSON.stringify(bad)}`);
   }
+});
+test("two changed answers are counted in the plural on the last line", async () => {
+  const w = world();
+  const script = ["no", "correct", "yes", "r1", "no", "correct", "yes", "r2"];
+  w.answer = (q) => (/^(Did you see|Your answer to|Why did you change)/.test(q) ? script.shift() : MULTI_ANSWERS(q));
+  w.parts.e1a = () => multiStep([BAR]);
+  assert.equal(await e1a(w), 0, w.err.join("\n"));
+  assert.equal(raw(w).trimEnd().split("\n").at(-1), "1 host step, 1 attested, 2 answers changed after confirmation");
 });

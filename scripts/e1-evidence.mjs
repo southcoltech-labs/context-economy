@@ -43,7 +43,7 @@ export const QUESTIONS = Object.freeze([
   { id: "typed", ask: "What did you type?" },
   { id: "shown", ask: "What command did the call show?" },
   { id: "result", ask: `What was the result? ${Object.entries(RESULT_CHOICES).map(([n, t]) => `${n} = ${t}`).join(", ")}` },
-  { id: "prompt", ask: "Did a permission prompt appear, and what did you choose? (say 'no prompt' if none)" },
+  { id: "prompt", ask: "How many permission prompts appeared, and what did you choose at each? (zero is a valid answer)" },
 ]);
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -255,6 +255,27 @@ export function validateEvidence(evidence) {
 
 const VISUAL_KEYS = ["host", "kind", "say", "expect"];
 
+/**
+ * Positive phrasing (design: "confirm only the unexpected answer"): a fixed question or a proof statement carries no
+ * negation word outside quotes, so that "yes" always means the good outcome and nothing reads as a double negative.
+ * Text inside backticks or double quotes is exempt (a quoted command, UI label or answer token). A crude guard, not a
+ * proof: a reviewer still checks that "yes" is the expected answer of every statement, and that quoted text is only a
+ * command, a UI label or an answer token (a statement written as `"No band" appears` would pass). The `say` lines are not linted:
+ * the lint does not cover the whole screen.
+ */
+const NEGATION = /\b(?:no|not|none|nothing|without|never)\b/i;
+export function negationProblem(text) {
+  const bare = String(text).replace(/`[^`]*`|"[^"]*"/g, " ");
+  const m = NEGATION.exec(bare);
+  return m ? `holds the negation word "${m[0]}" outside quotes` : undefined;
+}
+
+/** The fixed strings the attestation asks, as functions of a statement where they take one. All are linted (negationProblem). */
+export const VISUAL_QUESTION = (statement) => `Did you see: ${statement}? ("yes" or "no")`;
+export const CONFIRM_QUESTION = (statement) => `Your answer to "${statement}" was: "no". Confirm that, or correct it? ("confirm" or "correct")`;
+export const REASON_QUESTION = "Why did you change it? One line.";
+export const DESCRIBE_QUESTION = "Describe in a few words what you saw";
+
 /** The fields of a `visual` entry, as a reason string, or undefined when they are valid. `host` is checked by the caller. */
 export function validateVisual(entry) {
   if (!isObject(entry)) return "not an object";
@@ -262,29 +283,50 @@ export function validateVisual(entry) {
   if (unknown.length) return `unknown field ${unknown.join(", ")} for a visual entry`;
   if (!Array.isArray(entry.say) || entry.say.length > 3 || entry.say.some((l) => typeof l !== "string" || l === "" || /[\r\n]/.test(l))) return "`say` is not a list of at most 3 lines";
   if (!Array.isArray(entry.expect) || entry.expect.length < 1 || entry.expect.length > 4) return "`expect` is not a list of 1 to 4 statements";
+  const negated = entry.expect.map((s) => (typeof s === "string" ? negationProblem(s) : undefined)).find(Boolean);
+  if (negated) return `an \`expect\` statement ${negated} (write it so that "yes" is the expected answer)`;
   if (entry.expect.some((s) => typeof s !== "string" || s.trim() === "" || s.length > 100 || s.includes("?") || /[\r\n]/.test(s))) return "an `expect` statement is empty, longer than 100 characters or holds a `?`";
   return undefined;
 }
 
 const YES_NO = /^(yes|no)$/i;
+const CONFIRM_CORRECT = /^(confirm|correct)$/i;
 
 /**
- * Asks one statement at a time through `ask(question) -> Promise<string>`: "Did you see: <statement>? (yes/no)", then a
- * free-text description. A valid `no` fails at once and is never asked again; only an answer that is neither `yes` nor `no`
- * (or an empty description) is asked again, up to three times. Returns `{ result, reasons }`; the caller keeps every try.
+ * Asks one statement at a time through `ask(question) -> Promise<string>`: `Did you see: <statement>? ("yes" or "no")`, then a
+ * free-text description. A `yes` is never asked again. A valid `no` gets exactly one confirmation prompt that states the answer
+ * and takes only the words "confirm" or "correct" (anything else, "yes" and "no" included, is asked again, up to three times,
+ * then the step fails): `confirm` fails the statement; `correct` asks the original question once more, and that answer is
+ * final. A `yes` after a correction is a changed answer: it needs a one-line reason (empty is asked again, three tries, then a
+ * fail) and is passed to `onChange({ statement, first, second, reason })` at once, so a later stop cannot lose it. An answer that is
+ * neither `yes` nor `no` (or an empty description) is asked again up to three times. Returns `{ result, reasons }`; the caller keeps every try.
  */
-export async function askVisual(ask, expect) {
-  for (const statement of expect) {
+export async function askVisual(ask, expect, { onChange = () => {} } = {}) {
+  const askUntil = async (question, valid) => {
     let answer;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      answer = String(await ask(`Did you see: ${statement}? (yes/no)`)).trim();
-      if (YES_NO.test(answer)) break;
+      answer = String(await ask(question)).trim();
+      if (valid.test(answer)) return answer;
     }
-    if (!YES_NO.test(answer)) return { result: "fail", reasons: [`no valid yes/no answer for "${statement}" after 3 tries (last: ${JSON.stringify(answer)})`] };
-    if (/^no$/i.test(answer)) return { result: "fail", reasons: [`the operator did not see: ${statement}`] };
+    return undefined;
+  };
+  for (const statement of expect) {
+    const first = await askUntil(VISUAL_QUESTION(statement), YES_NO);
+    if (first === undefined) return { result: "fail", reasons: [`no valid yes/no answer for "${statement}" after 3 tries`] };
+    if (/^no$/i.test(first)) {
+      const choice = await askUntil(CONFIRM_QUESTION(statement), CONFIRM_CORRECT);
+      if (choice === undefined) return { result: "fail", reasons: [`no valid confirm/correct answer for "${statement}" after 3 tries`] };
+      if (/^confirm$/i.test(choice)) return { result: "fail", reasons: [`the operator did not see: ${statement}`] };
+      const second = await askUntil(VISUAL_QUESTION(statement), YES_NO);
+      if (second === undefined) return { result: "fail", reasons: [`no valid yes/no answer for "${statement}" after 3 tries`] };
+      if (/^no$/i.test(second)) return { result: "fail", reasons: [`the operator did not see: ${statement} (confirmed after a correction)`] };
+      const reason = await askUntil(REASON_QUESTION, /\S/);
+      if (reason === undefined) return { result: "fail", reasons: [`no reason for changing the answer to "${statement}" after 3 tries`] };
+      onChange({ statement, first: "no", second: "yes", reason });
+    }
   }
   let description = "";
-  for (let attempt = 1; attempt <= 3 && description === ""; attempt++) description = String(await ask("Describe in a few words what you saw")).trim();
+  for (let attempt = 1; attempt <= 3 && description === ""; attempt++) description = String(await ask(DESCRIBE_QUESTION)).trim();
   if (description === "") return { result: "fail", reasons: ["no description of what the operator saw after 3 tries"] };
   return { result: "pass", reasons: [] };
 }

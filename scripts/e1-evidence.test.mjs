@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { appendFileSync, rmSync } from "node:fs";
-import { QUESTIONS, RESULT_CHOICES, askQuestions, checkLedger, classifyOutput, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
+import { CONFIRM_QUESTION, DESCRIBE_QUESTION, QUESTIONS, REASON_QUESTION, RESULT_CHOICES, VISUAL_QUESTION, askQuestions, askVisual, negationProblem, validateVisual, checkLedger, classifyOutput, evaluate, evaluateAttested, ledgerCursor, ledgerWindow, validModel, validateEvidence } from "./e1-evidence.mjs";
 
 const T0 = Date.parse("2026-11-14T10:00:00Z");
 const LEDGER = ".claude/context-economy/gateway-ledger";
@@ -243,4 +243,72 @@ test("V5: an attested step counts a row only when its time is inside launch-to-e
 test("V9: ledgerDir is a relative path the module holds; absolute paths and .. are refused", () => {
   assert.equal(validateEvidence(BEHAVIOUR), undefined);
   for (const bad of ["/etc", "../x", ".claude/../x", "", "a//b", ".claude/", "gateway ledger"]) assert.match(validateEvidence({ ...BEHAVIOUR, ledgerDir: bad }) ?? "", /ledgerDir/, bad);
+});
+
+// --- confirm only the unexpected answer (design: e1-driver-confirm-unexpected) ----------------------------------------
+
+/** An `ask` that answers from a script and records every question. */
+const scripted = (answers) => { const asked = []; const left = [...answers]; return { asked, ask: async (q) => { asked.push(q); return left.length ? left.shift() : ""; } }; };
+const S = "a coloured bar above the prompt";
+
+test("a yes is never asked twice: one question per statement, then the description", async () => {
+  const s = scripted(["yes", "a bar"]);
+  assert.deepEqual(await askVisual(s.ask, [S]), { result: "pass", reasons: [] });
+  assert.deepEqual(s.asked, [VISUAL_QUESTION(S), DESCRIBE_QUESTION]);
+});
+test("a no then confirm fails, and nothing is reported as changed", async () => {
+  const s = scripted(["no", "confirm"]); const changed = [];
+  const r = await askVisual(s.ask, [S], { onChange: (c) => changed.push(c) });
+  assert.equal(r.result, "fail"); assert.match(r.reasons[0], /did not see: a coloured bar/);
+  assert.deepEqual(s.asked, [VISUAL_QUESTION(S), CONFIRM_QUESTION(S)]);
+  assert.deepEqual(changed, []);
+});
+test("a no, correct, yes and a reason passes, and the change is reported with its reason", async () => {
+  const s = scripted(["no", "correct", "yes", "I misread the question", "a bar"]); const changed = [];
+  assert.deepEqual(await askVisual(s.ask, [S], { onChange: (c) => changed.push(c) }), { result: "pass", reasons: [] });
+  assert.deepEqual(s.asked, [VISUAL_QUESTION(S), CONFIRM_QUESTION(S), VISUAL_QUESTION(S), REASON_QUESTION, DESCRIBE_QUESTION]);
+  assert.deepEqual(changed, [{ statement: S, first: "no", second: "yes", reason: "I misread the question" }]);
+});
+test("a no, correct, no fails with no third round", async () => {
+  const s = scripted(["no", "correct", "no", "yes"]); const changed = [];
+  const r = await askVisual(s.ask, [S], { onChange: (c) => changed.push(c) });
+  assert.equal(r.result, "fail"); assert.match(r.reasons[0], /confirmed after a correction/);
+  assert.equal(s.asked.length, 3); assert.deepEqual(changed, []);
+});
+test("the confirmation prompt takes only confirm or correct: yes and no are asked again, three bad tries fail, case and spaces are ignored", async () => {
+  const s = scripted(["no", "yes", "no", "maybe"]);
+  const r = await askVisual(s.ask, [S]);
+  assert.equal(r.result, "fail"); assert.match(r.reasons[0], /no valid confirm\/correct answer/);
+  assert.deepEqual(s.asked, [VISUAL_QUESTION(S), CONFIRM_QUESTION(S), CONFIRM_QUESTION(S), CONFIRM_QUESTION(S)]);
+  const ok = scripted(["no", " CORRECT ", "yes", "reason", "d"]); const ch = [];
+  assert.equal((await askVisual(ok.ask, [S], { onChange: (c) => ch.push(c) })).result, "pass");
+  assert.equal(ch.length, 1);
+  const c = scripted(["no", "Confirm"]);
+  assert.equal((await askVisual(c.ask, [S])).result, "fail");
+});
+test("a changed answer needs a one-line reason: an empty one is asked again, three empty ones fail and report nothing", async () => {
+  const again = scripted(["no", "correct", "yes", "  ", "because", "d"]); const a = [];
+  assert.equal((await askVisual(again.ask, [S], { onChange: (c) => a.push(c) })).result, "pass");
+  assert.equal(a[0].reason, "because");
+  const none = scripted(["no", "correct", "yes", "", " ", ""]); const b = [];
+  const r = await askVisual(none.ask, [S], { onChange: (c) => b.push(c) });
+  assert.equal(r.result, "fail"); assert.match(r.reasons[0], /no reason for changing/); assert.deepEqual(b, []);
+});
+test("a wrong call-result number fails on the first answer, with no confirmation prompt", async () => {
+  const s = scripted(["git status", "Bash(git status)", "2", "zero"]);
+  const answers = await askQuestions(s.ask);
+  assert.equal(s.asked.length, 4);
+  assert.equal(evaluateAttested({ ...BEHAVIOUR, result: 1 }, answers, [row()], WINDOW).result, "fail");
+});
+test("positive phrasing: the shipped fixed strings and proof statements hold no negation outside quotes; quotes are exempt", async () => {
+  const fixed = [...QUESTIONS.map((q) => q.ask), VISUAL_QUESTION("x"), CONFIRM_QUESTION("x"), REASON_QUESTION, DESCRIBE_QUESTION];
+  for (const s of fixed) assert.equal(negationProblem(s), undefined, s);
+  for (const name of ["context-bar", "tool-gateway"]) {
+    const m = (await import(`./proof/${name}.mjs`)).default;
+    for (const e of [...(m.behaviour ?? []), ...(m.offSwitch?.checks ?? []), ...(m.uninstall ?? [])]) for (const s of e.expect ?? []) assert.equal(negationProblem(s), undefined, `${name}: ${s}`);
+  }
+  for (const bad of ['(yes/no)', "No band appears", "shows no arguments", "it is not drawn", "nothing above", "without the switch", "never shown", "say none"]) assert.ok(negationProblem(bad), bad);
+  for (const ok of ['("yes" or "no")', 'The label `no-op` is shown', 'The label "Not found" is shown']) assert.equal(negationProblem(ok), undefined, ok);
+  assert.match(validateVisual({ host: "claude", kind: "visual", say: [], expect: ["No band appears"] }), /negation word "No"/);
+  assert.equal(validateVisual({ host: "claude", kind: "visual", say: [], expect: ["The area above the prompt is empty"] }), undefined);
 });

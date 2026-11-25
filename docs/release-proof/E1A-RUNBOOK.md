@@ -131,7 +131,7 @@ node scripts/check-release-proof.mjs "$V" "$SHA" tool-gateway --pi tool-gateway 
 - `combine` writes `docs/release-proof/$V.json` from the run files, one run per platform. It reads no host. It refuses a missing platform, a run file for another version, SHA or platform, and a pending capture. `$V.json` is derived: a new capture, finalize or combine for this version removes the earlier one first, so a refused or aborted step never leaves an earlier pass in place.
 - The checker must print "complete pass".
 
-`$V.md` is written by the engineer, not by a script and not by the runner. Each runner keeps a plain-text transcript (commands and their output, the clean checks, host versions; no screenshots, login details or personal addresses), and the engineer combines the transcripts into `$V.md`.
+`$V.md` is written by the engineer, not by a script and not by the runner. Each runner keeps a plain-text transcript (commands and their output, the clean checks, host versions; no screenshots, login details or personal addresses), and the engineer combines the transcripts into `$V.md`. `$V.md` also lists every answer the driver recorded as changed after confirmation (the block "answers changed after confirmation" at the end of every attempt's driver transcript, including attempts that stopped), each with its reason, or says `Changed answers: none`.
 
 Commit `docs/release-proof/$V.json` and `$V.md` to `main` in a pull request (docs-only, labeled `no-release`). The promotion workflow reads them from there. The per-platform run files are not committed.
 
