@@ -122,7 +122,7 @@ test("two plugins: the instructions are prefixed with the plugin name, in market
   const f = flow();
   await f.run();
   const at = (id) => { const i = f.said.findIndex((l) => l.includes(`>>> ${id}:`)); return f.said.slice(i + 1, f.said.indexOf("", i + 1)).map((l) => l.trim()); };
-  assert.deepEqual(at("E1a.4a"), ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", "tool-gateway: Type: Run git status", "bar-plugin: Type: /bar min", "Approve the permission prompt for the RTK path and `git status` (it shows the rewrite reached Claude Code).", "Then quit with /exit."]);
+  assert.deepEqual(at("E1a.4a"), ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", "tool-gateway: Type: Run git status", "Approve the permission prompt for the RTK path and `git status` (it shows the rewrite reached Claude Code).", "bar-plugin: Type: /bar min", "Then quit with /exit."]);
   assert.deepEqual(at("E1a.4s.bar-plugin.pi"), ["bar-plugin: ", "tool-gateway: Type: Run git status", "Then quit Pi."].filter((l) => l !== "bar-plugin: "));
 });
 test("the off-switch environment is in the off-switch launches only; the recorder and the next launches do not get it", async () => {
@@ -255,4 +255,29 @@ test("loader: ambiguous ledger ownership stops: a folder claimed by two modules,
 test("loader: a session that would carry more than 8 lines of instructions stops", async () => {
   const wordy = (name) => { const m = { ...structuredClone(BAR), name }; delete m.offSwitch; for (const e of m.behaviour) e.say = ["a", "b", "c"]; return m; };
   await stops({ "tool-gateway": toolGateway, "bar-one": wordy("bar-one"), "bar-two": wordy("bar-two"), "bar-three": wordy("bar-three") }, /more than 8/);
+});
+
+// --- the order of the Claude lines (the permission prompt comes right after the call's line) ------------------------------
+
+test("Claude behaviour lines: the permission prompt follows the git status line, before a later visual plugin's lines; the uninstall lines keep their own order", () => {
+  const vars = { V, platform: "macos-arm64", staging: STAGING };
+  const ctx = { proofs: [toolGateway, BAR], env: { HOME: "/h" }, vars, sha: SHA, hostResults: {}, step: { id: "E1a.4a" } };
+  ctx.steps = resolveSteps(ctx, e1aSteps(vars));
+  const say = (id) => ctx.steps.find((s) => s.id === id).human(ctx).say;
+  const prompt = "Approve the permission prompt for the RTK path and `git status` (it shows the rewrite reached Claude Code).";
+  assert.deepEqual(say("E1a.4a"), ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", "tool-gateway: Type: Run git status", prompt, "bar-plugin: Type: /bar min", "Then quit with /exit."]);
+  const un = ctx.steps.find((s) => s.tag?.phase === "uninstall" && s.tag?.host === "claude").human(ctx).say;
+  assert.equal(un[0], "Check the footer shows no 'auto mode' (Shift+Tab until it does not).");
+  assert.ok(un.indexOf("tool-gateway: Type: Run git status") < un.indexOf("Approve the permission prompt for `git status`."));
+  assert.ok(un.indexOf("Approve the permission prompt for `git status`.") < un.indexOf("Expect Git's own `On branch main ...` output, with no RTK path."));
+  assert.equal(un.at(-1), "Then quit with /exit.");
+});
+
+test("Claude behaviour lines with a visual plugin listed before the call plugin: the permission prompt still follows the git status line", () => {
+  const vars = { V, platform: "macos-arm64", staging: STAGING };
+  const ctx = { proofs: [BAR, toolGateway], env: { HOME: "/h" }, vars, sha: SHA, hostResults: {}, step: { id: "E1a.4a" } };
+  ctx.steps = resolveSteps(ctx, e1aSteps(vars));
+  const s = ctx.steps.find((x) => x.tag?.phase === "behaviour" && x.tag?.host === "claude").human(ctx).say;
+  const prompt = "Approve the permission prompt for the RTK path and `git status` (it shows the rewrite reached Claude Code).";
+  assert.deepEqual(s, ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", "bar-plugin: Type: /bar min", "tool-gateway: Type: Run git status", prompt, "Then quit with /exit."]);
 });

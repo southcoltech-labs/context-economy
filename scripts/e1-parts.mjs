@@ -95,6 +95,11 @@ function sessionLines(pairs) {
   const several = new Set(pairs.map((p) => p.module.name)).size > 1;
   return pairs.flatMap((p) => (kindOf(p.entry) === "visual" ? p.entry.say : [`Type: Run ${p.entry.command}`]).map((l) => (several ? `${p.module.name}: ${l}` : l)));
 }
+/** The number of leading lines of `sessionLines(pairs)` up to and including the last call entry's line: the permission prompt appears right after that call. */
+function linesThroughLastCall(pairs) {
+  const last = pairs.findLastIndex((p) => kindOf(p.entry) === "call");
+  return last < 0 ? 0 : sessionLines(pairs.slice(0, last + 1)).length;
+}
 /** The commands of the session's call entries, for the lines that ask for approval. */
 const callCommands = (pairs) => pairs.filter((p) => kindOf(p.entry) === "call").map((p) => `\`${p.entry.command}\``).join(" and ");
 
@@ -105,8 +110,10 @@ function sessionHuman(ctx, host, pairs, phase, { env } = {}) {
   const approve = !calls ? [] : phase === "uninstall"
     ? [`Approve the permission prompt for ${calls}.`, "Expect Git's own `On branch main ...` output, with no RTK path."]
     : host === "claude" ? [`Approve the permission prompt for the RTK path and ${calls} (it shows the rewrite reached Claude Code).`] : [];
+  // Claude, behaviour phase: the prompt for the RTK path comes right after the call's line, before any later visual lines.
+  const afterCall = host === "claude" && phase !== "uninstall" ? linesThroughLastCall(pairs) : lines.length;
   const say = host === "claude"
-    ? ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", ...lines, ...approve, "Then quit with /exit."]
+    ? ["Check the footer shows no 'auto mode' (Shift+Tab until it does not).", ...lines.slice(0, afterCall), ...approve, ...lines.slice(afterCall), "Then quit with /exit."]
     : [...lines, ...(phase === "uninstall" ? approve.slice(1) : []), "Then quit Pi."];
   return { host, say, entries: pairs.map((p) => entryOf(p, phase)), ...(env ? { env } : {}) };
 }
