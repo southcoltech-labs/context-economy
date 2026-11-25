@@ -10,7 +10,30 @@ Run once on **macOS arm64** and once on **Linux x86_64**, each on a clean machin
 STAGING=southcoltech-labs/context-economy   # the staging repository
 V=<version>                      # the candidate, e.g. 0.1.0
 SHA=<40-hex commit of v$V>       # git rev-parse "v$V^{commit}" in a staging clone
+PLATFORM=macos-arm64             # or linux-x86_64
 ```
+
+Get `$SHA` from the tag, never from a branch or a copy: `SHA=$(git -C <staging clone> rev-parse "v$V^{commit}")`, then check it is 40 hex characters. The tag is annotated or not; `^{commit}` peels either.
+
+## Run sheet (one platform, in this order)
+
+Keep a plain-text transcript of every command below and its output. The sheet's rows are **sheet steps**; "§N" is the numbered section below that explains a row (§1 to §7). Do not skip ahead: sheet steps 5 to 7 produce the results that the capture (sheet step 8) attests, and the uninstall checks (sheet step 9) come **before** finalize (sheet step 10), because finalize attests their result.
+
+| Sheet step | Do | Section | Record |
+| --- | --- | --- | --- |
+| 0 | Clean check (a), before anything is installed: `date -u +%FT%TZ`, `uname -sm`, `ls -d ~/.claude ~/.pi` (both absent), `env \| grep -c '^\(CE_RTK_BIN\|CLAUDE_CONFIG_DIR\|PI_CODING_AGENT_DIR\)='` (0), and no `managed-settings.json` under `/etc/claude-code/` or, on macOS, `/Library/Application Support/ClaudeCode/` | | the output |
+| 1 | Install and sign in to Claude Code and to Pi (Pi from npm, on Node 24 or later; `ls -l "$(command -v pi)"` must point into a `node_modules` folder), then **clean check (b)**: no `~/.claude/plugins/installed_plugins.json`, no `~/.pi/agent/git`, no `~/.claude/context-economy`, no `CE_RTK_BIN` in `~/.claude/settings.json`, and in `~/.claude/plugins/known_marketplaces.json` (a missing file is fine) no marketplace named `context-economy` and none from `southcoltech-labs` | | the output |
+| 2 | Versions: `node --version`, `git --version`, `claude --version`, `pi --version` | | the output |
+| 3 | Clone `$STAGING` to a folder you will run the recorder from, check `.claude-plugin/marketplace.json` exists there, and take `$SHA` from this clone (see Inputs) | Inputs | the clone path, `$SHA` |
+| 4 | Install RTK as the README says | §1 | `rtk 0.47.0` and the `rtk.path` line |
+| 5 | Install the candidate on both coding agents, then start a new `claude` session and a new `pi` session | §2 | each install result |
+| 6 | In each coding agent, type: Run git status | §3 | the command, the output, the ledger row, any permission prompt |
+| 7 | With more than one plugin: each plugin's behaviour check, and each off-switch check | §3 (§5a) | one row per check |
+| 8 | **Capture**, with the install and behaviour results from sheet steps 5 to 7 | §4 | the command and its output |
+| 9 | Uninstall, start each coding agent again with no `CE_*` variable set (`env \| grep '^CE_'` prints nothing), and run the post-uninstall checks: no rewrite, no new ledger rows, only the data folders the README lists | §5 | each check and its result |
+| 10 | **Finalize**, with the uninstall results from sheet step 9 | §6 | the command and its output |
+
+When both platforms are done, the engineer combines the run files (§7) and writes `$V.md` from the two transcripts.
 
 ## 1. Install RTK (README §1 only)
 
@@ -30,7 +53,7 @@ Start a new `claude` session and a new `pi` session (do not restart the machine)
 
 ## 3. Run the behaviour check
 
-Record each command and its output in the transcript. Do not uninstall yet: step 4 reads the installed state.
+Record each command and its output in the transcript. Do not uninstall yet: §4 (capture) reads the installed state.
 
 | Coding agent | Behaviour | Pass when |
 | --- | --- | --- |
@@ -45,35 +68,35 @@ Applies only when the marketplace at `v$V` lists more than one plugin; with tool
 
 | Attestation | Passed only after | When |
 | --- | --- | --- |
-| `install` | Every listed plugin is installed and confirmed (step 2) | Before capture |
+| `install` | Every listed plugin is installed and confirmed (§2) | Before capture |
 | `behavior` | Every plugin's behaviour check (this step), **and** every required off-switch check below | Before capture, while the plugins are still installed |
-| `uninstall` | Every plugin is removed and the post-uninstall checks of step 5 pass, including data left | After capture, passed to finalize |
+| `uninstall` | Every plugin is removed and the post-uninstall checks of §5 pass, including data left | After capture, passed to finalize |
 
-Steps 3 and 5 hold these checks:
+§3 and §5 hold these checks:
 
-| Check | Claude Code | Pi | Step |
+| Check | Claude Code | Pi | Section |
 | --- | --- | --- | --- |
-| Behaviour, one row per plugin | The plugin's own check, from its SPEC or test plan (tool-gateway: the row above) | The same, on Pi | 3 |
-| Off switch (a plugin that has one) | Start the coding agent with that plugin's switch set (for example `CE_<NAME>=off`): the plugin does nothing, and every **other** plugin's behaviour row still passes | The same | 3 |
-| Uninstall | Remove every plugin and start a new session. No plugin's feature appears, and no new ledger row | `pi remove` the package and start a new session. No extension's feature appears | 5 |
-| Data left | Exactly the README list. A plugin that keeps no data adds nothing, which does **not** mean the shared folder is empty | The same | 5 |
+| Behaviour, one row per plugin | The plugin's own check, from its SPEC or test plan (tool-gateway: the row above) | The same, on Pi | §3 |
+| Off switch (a plugin that has one) | Start the coding agent with that plugin's switch set (for example `CE_<NAME>=off`): the plugin does nothing, and every **other** plugin's behaviour row still passes | The same | §3 |
+| Uninstall | Remove every plugin and start a new session. No plugin's feature appears, and no new ledger row | `pi remove` the package and start a new session. No extension's feature appears | §5 |
+| Data left | Exactly the README list. A plugin that keeps no data adds nothing, which does **not** mean the shared folder is empty | The same | §5 |
 
-Off-switch overrides are **command-scoped**: set the variable on that one launch only, for example `CE_<NAME>=off claude` and `CE_<NAME>=off pi`, never with `export`, and not in any settings or config file. Then check that no off switch is left in effect before the next launch: `env | grep '^CE_'` prints nothing in the shell, and no host settings file sets one. The post-uninstall launches of step 5 must run with every off switch absent, in the same shell set-up as the behaviour checks, or a missing feature proves the switch, not the removal. A persistent off switch never counts as uninstall evidence.
+Off-switch overrides are **command-scoped**: set the variable on that one launch only, for example `CE_<NAME>=off claude` and `CE_<NAME>=off pi`, never with `export`, and not in any settings or config file. Then check that no off switch is left in effect before the next launch: `env | grep '^CE_'` prints nothing in the shell, and no host settings file sets one. The post-uninstall launches of §5 must run with every off switch absent, in the same shell set-up as the behaviour checks, or a missing feature proves the switch, not the removal. A persistent off switch never counts as uninstall evidence.
 
 ## 4. Capture (before uninstall)
 
-Run from a checkout of the candidate's `main`, with both coding agents still installed, giving the install and behaviour results from steps 2–3:
+Run from a checkout of the candidate's `main`, with both coding agents still installed, giving the install and behaviour results from §2 and §3:
 
 ```bash
-node scripts/e1a-record.mjs capture --version "$V" --sha "$SHA" --platform macos-arm64 --pi-repo "$STAGING" \
+node scripts/e1a-record.mjs capture --version "$V" --sha "$SHA" --platform "$PLATFORM" --pi-repo "$STAGING" \
   --claude "install=<pass|fail>,behavior=<pass|fail>" --pi "install=<pass|fail>,behavior=<pass|fail>"
 ```
 
-Quote each result argument, and replace each `<pass|fail>` with the result you observed in steps 2 and 3, never a value you did not check. Left unquoted, zsh reads `<` and `|` as shell operators.
+Quote each result argument, and replace each `<pass|fail>` with the result you observed in §2 and §3, never a value you did not check. Left unquoted, zsh reads `<` and `|` as shell operators.
 
 - `installed_commit` is not attested by you. The recorder reads it from `~/.claude/plugins/installed_plugins.json` (`gitCommitSha` of each plugin the marketplace lists) and from the Pi package clone's HEAD, and passes it only when every one equals `$SHA`.
 - It writes `docs/release-proof/$V-<platform>.capture.json`, bound to `$V`, `$SHA`, the platform, `$STAGING` and the Claude and Pi host folders it read.
-- Before reading the coding agents it removes this platform's earlier run file (`$V-<platform>.json`) and any pending capture, so a capture that then fails leaves nothing to finalize or promote. A failed capture is kept as failed; to try again, start over from step 2 and capture again.
+- Before reading the coding agents it removes this platform's earlier run file (`$V-<platform>.json`) and any pending capture, so a capture that then fails leaves nothing to finalize or promote. A failed capture is kept as failed; to try again, start over from §2 and capture again.
 
 ## 5. Uninstall
 
@@ -87,12 +110,12 @@ Start each coding agent again, with no off switch set (see §5a: `env | grep '^C
 ## 6. Finalize (after uninstall)
 
 ```bash
-node scripts/e1a-record.mjs finalize --version "$V" --sha "$SHA" --platform macos-arm64 --pi-repo "$STAGING" \
+node scripts/e1a-record.mjs finalize --version "$V" --sha "$SHA" --platform "$PLATFORM" --pi-repo "$STAGING" \
   --claude "uninstall=<pass|fail>" --pi "uninstall=<pass|fail>"
 ```
 
 - Finalize uses the capture's commits and results as they are; it does not read the installed commits again.
-- It refuses a missing capture, one for another version, SHA or platform, and a different `--pi-repo`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` or `HOME` than at capture. Run it in the same shell set-up as step 4.
+- It refuses a missing capture, one for another version, SHA or platform, and a different `--pi-repo`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR` or `HOME` than at capture. Run it in the same shell set-up as §4.
 - It checks that the installs are gone: a remaining Claude entry or Pi clone records uninstall as failed.
 - It writes this platform's run to its own file, `docs/release-proof/$V-<platform>.json`, and deletes the capture, so a capture is used once. Each machine keeps its own run file; nothing is copied between machines during the runs.
 
