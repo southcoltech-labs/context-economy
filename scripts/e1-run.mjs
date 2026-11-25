@@ -629,7 +629,7 @@ async function judgeHostStep(ctx, step, h, entries, window, { guard, fail }) {
         let answers, verdict;
         try {
           if (kind === "call") answers = await askQuestions(ask);
-          else verdict = await askVisual(ask, e.expect);
+          else verdict = await askVisual(ask, e.expect, { onChange: (c) => noteChange(ctx, step, labelOf(e), c) });
         } finally {
           asked.push([labelOf(e), log]);
           for (const [question, a] of log) transcript.append(`ATTESTED ${labelOf(e)} Q: ${question}\nATTESTED ${labelOf(e)} A: ${a}\n`);
@@ -748,7 +748,7 @@ export async function main(argv, deps = defaultDeps()) {
   const versionFile = command !== "e1a" ? join(folder, "host-versions.json") : join(attemptDir, "host-versions.json");
   const ctx = {
     deps, vars, cwd: command === "prepare" ? home : vars.clone, env: command === "prepare" ? prepareEnv(allowedEnv(env), home) : allowedEnv(env), transcript, attemptDir, folder, runsDir, steps, proofs: [], step: undefined, passEnv: pass.values,
-    assertSpans: [], hostRuns: [], hostResults: {}, interrupts: 0, results: {},
+    assertSpans: [], hostRuns: [], hostResults: {}, changedAnswers: [], interrupts: 0, results: {},
   };
   transcript.append(`# e1-run ${command} ${argv.slice(1).join(" ")}\n# attempt ${n}, started ${deps.now().toISOString()}\n`);
 
@@ -780,8 +780,10 @@ export async function main(argv, deps = defaultDeps()) {
       code = 1;
     }
   }
+  // Changed answers are listed on every exit, a stop or an interrupt included, and counted on the last line.
+  if (ctx.changedAnswers.length) transcript.append(`\n${changedBlock(ctx)}\n`);
   // V6: a run says how many host steps were attested, as the last line of the transcript.
-  if (hostCounts(ctx)) transcript.append(`${hostCounts(ctx)}\n`);
+  if (hostCounts(ctx) || ctx.changedAnswers.length) transcript.append(`${hostCounts(ctx)}${changedCount(ctx)}\n`.replace(/^, /, ""));
   transcript.close();
 
   const scrubbed = scrubFile(ctx, rawFile, join(attemptDir, `${name}.txt`));
@@ -847,6 +849,14 @@ function scrubAttempt(argv, deps) {
   for (const note of r.notes) log.error(`e1-run: ${note}`);
   return 0;
 }
+
+/** A visual answer changed after the confirmation: written to the transcript at once and kept for the end-of-run block. */
+function noteChange(ctx, step, label, c) {
+  ctx.changedAnswers.push({ step: step.id, label, ...c });
+  ctx.transcript.append(`[answer changed ${label}: "${c.statement}": ${c.first} -> ${c.second}; reason: ${c.reason}]\n`);
+}
+const changedCount = (ctx) => (ctx.changedAnswers.length ? `, ${ctx.changedAnswers.length} answer${ctx.changedAnswers.length === 1 ? "" : "s"} changed after confirmation` : "");
+const changedBlock = (ctx) => ["=== answers changed after confirmation ===", ...ctx.changedAnswers.map((c) => `${c.label}: "${c.statement}": ${c.first} -> ${c.second}; reason: ${c.reason}`)].join("\n");
 
 /** `2 host steps, 1 attested`, or an empty string when no host step ran. A step that holds several checks adds `(N checks)`. Counts steps that reached a verdict; a step that stopped at the ledger read (V4) has none and is not counted. */
 function hostCounts(ctx) {

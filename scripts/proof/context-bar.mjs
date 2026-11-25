@@ -8,8 +8,8 @@ const claudeUp = ["Start a session, type /context-bar to show the band, then sen
 const piUp = ["Start a session and send a short prompt.", "Type /context-bar top."];
 const bandAbove = "A band above the prompt shows a bar and a legend";
 const rowsAdd = "The rows of the legend add up to the used figure in the header";
-const topLabels = "In the top list a Bash row names at most one command and shows no arguments";
-const noBand = "No band appears above the prompt";
+const topLabels = "In the top list a Bash row shows at most one command name, and only that name";
+const noBand = "The area above the prompt is empty";
 
 export default {
   name: "context-bar",

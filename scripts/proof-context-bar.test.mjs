@@ -27,7 +27,7 @@ test("the Claude off-switch and uninstall checks also type /context-bar, so an a
   for (const list of [proof.offSwitch.checks, proof.uninstall]) {
     const [claude] = hostsOf(list, "claude");
     assert.ok(enables(claude), `${said(claude)} does not type /context-bar`);
-    assert.deepEqual(claude.expect, ["No band appears above the prompt"]);
+    assert.deepEqual(claude.expect, ["The area above the prompt is empty"]);
   }
 });
 

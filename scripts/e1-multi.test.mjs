@@ -24,8 +24,8 @@ const visual = (host, say, expect) => ({ host, kind: "visual", say, expect });
 const BAR = {
   name: "bar-plugin", hosts: ["claude", "pi"],
   behaviour: ["claude", "pi"].map((h) => visual(h, ["Type: /bar min"], ["a coloured bar above the prompt", "the bar shrank to one line"])),
-  offSwitch: { env: { CE_BAR: "off" }, checks: ["claude", "pi"].map((h) => visual(h, [], ["no bar at any time"])) },
-  uninstall: ["claude", "pi"].map((h) => visual(h, [], ["no bar at any time"])),
+  offSwitch: { env: { CE_BAR: "off" }, checks: ["claude", "pi"].map((h) => visual(h, [], ["the bar stays hidden the whole time"])) },
+  uninstall: ["claude", "pi"].map((h) => visual(h, [], ["the bar stays hidden the whole time"])),
   dataLeft: [],
 };
 const MODULES = { "tool-gateway": toolGateway, "bar-plugin": BAR };
@@ -143,7 +143,7 @@ test("the other plugin's behaviour is judged in the off-switch session: no ledge
 });
 test("a visual `no` fails the host step, names the plugin, and capture never runs", async () => {
   const f = flow();
-  f.answer = (q) => (/^Did you see: a coloured/.test(q) ? "no" : /^Did you see/.test(q) ? "yes" : /^Describe/.test(q) ? "x" : /result/i.test(q) ? "1" : /permission prompt/i.test(q) ? "no prompt" : "git status");
+  f.answer = (q) => (/^Did you see: a coloured/.test(q) ? "no" : /^Your answer to/.test(q) ? "confirm" : /^Did you see/.test(q) ? "yes" : /^Describe/.test(q) ? "x" : /result/i.test(q) ? "1" : /permission prompt/i.test(q) ? "no prompt" : "git status");
   assert.equal(await f.run(), 1);
   assert.match(f.err.join("\n"), /STOP at E1a\.4a/);
   assert.match(f.err.join("\n"), /bar-plugin visual: the operator did not see: a coloured bar above the prompt/);
@@ -174,7 +174,7 @@ test("a stray row in a folder nobody owns after the uninstall fails the uninstal
 });
 test("a visual-only marketplace: a row in a retained folder of a plugin no longer installed fails", async () => {
   const quiet = { name: "quiet", hosts: ["claude", "pi"], ledgerDirs: { claude: ".claude/context-economy/quiet-ledger", pi: ".claude/context-economy/quiet-ledger-pi" },
-    behaviour: ["claude", "pi"].map((h) => visual(h, [], ["a quiet band"])), uninstall: ["claude", "pi"].map((h) => visual(h, [], ["no band"])), dataLeft: ["quiet-ledger", "quiet-ledger-pi"] };
+    behaviour: ["claude", "pi"].map((h) => visual(h, [], ["a quiet band"])), uninstall: ["claude", "pi"].map((h) => visual(h, [], ["the area above the prompt is empty"])), dataLeft: ["quiet-ledger", "quiet-ledger-pi"] };
   const f = flow({ plugins: ["quiet"], proofDir: proofDirOf({ quiet }) });
   f.onLaunch = (host, n) => { if (n === 1) f.row("quiet-ledger-pi"); };
   assert.equal(await f.run(), 1);
