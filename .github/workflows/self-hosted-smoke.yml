@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# Smoke test for the repository's self-hosted runner: it checks out the repo and reports the host.
+# Manual trigger only. The repository is public, so no pull request event may reach a self-hosted runner.
+name: self-hosted smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: self-hosted smoke
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Report the runner
+        run: |
+          echo "runner: $RUNNER_NAME ($RUNNER_OS/$RUNNER_ARCH)"
+          uname -a
+          echo "commit: $(git rev-parse --short HEAD)"
+          df -h "$RUNNER_WORKSPACE" | tail -1
